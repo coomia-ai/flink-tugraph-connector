@@ -151,7 +151,8 @@ public class TuGraphDynamicTableSinkFactory implements DynamicTableSinkFactory {
                     dstLabel, dstKey, columnIndex(names, dstCol, EDGE_DST_COL.key()));
         }
 
-        return new TuGraphDynamicTableSink(sinkOptions, converter.build());
+        return new TuGraphDynamicTableSink(
+                sinkOptions, converter.build(), elementType == ElementType.VERTEX);
     }
 
     private static String require(ReadableConfig config, ConfigOption<String> option, ElementType type) {

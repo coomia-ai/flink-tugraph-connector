@@ -68,6 +68,17 @@ public interface CypherStatementBuilder extends Serializable {
                                           String dstLabel, String dstKey,
                                           List<Edge> batch);
 
+    /**
+     * Build the statement(s) that delete a batch of vertices by primary key (DETACH, also removing
+     * any attached edges). Deleting a missing key is a harmless no-op.
+     */
+    List<CypherStatement> buildVertexDelete(String label, String primaryKey, List<Vertex> batch);
+
+    /** Build the statement(s) that delete a batch of edges by their endpoints and label. */
+    List<CypherStatement> buildEdgeDelete(String edgeLabel,
+                                          String srcLabel, String srcKey,
+                                          String dstLabel, String dstKey,
+                                          List<Edge> batch);
     /** Result alias carrying the number of edges written, used to compute skipped endpoints. */
     String WRITTEN_COUNT_FIELD = "written";
 }

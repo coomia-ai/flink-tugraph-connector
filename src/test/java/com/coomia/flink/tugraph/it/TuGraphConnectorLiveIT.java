@@ -23,7 +23,15 @@ import com.coomia.flink.tugraph.cypher.MergeCypherStatementBuilder;
 import com.coomia.flink.tugraph.element.Edge;
 import com.coomia.flink.tugraph.element.Vertex;
 import com.coomia.flink.tugraph.sink.TuGraphSink;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.api.Schema;
+import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.table.connector.ChangelogMode;
+import org.apache.flink.types.Row;
+import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -175,6 +183,47 @@ class TuGraphConnectorLiveIT {
             m.put((String) kv[i], kv[i + 1]);
         }
         return m;
+    }
+
+    @Test
+    void writesChangelogWithDeletesViaFlinkSql() throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        StreamTableEnvironment tEnv = StreamTableEnvironment.create(env);
+
+        // A changelog: insert p1 and p2, then delete p1 -> only p2 should remain.
+        DataStream<Row> changelog = env.fromCollection(
+                List.of(Row.ofKind(RowKind.INSERT, "p1", "Acme"),
+                        Row.ofKind(RowKind.INSERT, "p2", "Beta"),
+                        Row.ofKind(RowKind.DELETE, "p1", "Acme")),
+                Types.ROW_NAMED(new String[] {"company_id", "name"}, Types.STRING, Types.STRING));
+        Schema schema = Schema.newBuilder()
+                .column("company_id", DataTypes.STRING().notNull())
+                .column("name", DataTypes.STRING())
+                .primaryKey("company_id")
+                .build();
+        tEnv.createTemporaryView("src", tEnv.fromChangelogStream(changelog, schema, ChangelogMode.all()));
+
+        tEnv.executeSql(
+                "CREATE TABLE company_vertex (\n"
+                        + "  company_id STRING,\n"
+                        + "  name STRING,\n"
+                        + "  PRIMARY KEY (company_id) NOT ENFORCED\n"
+                        + ") WITH (\n"
+                        + "  'connector' = 'tugraph',\n"
+                        + "  'uri' = '" + uri() + "',\n"
+                        + "  'username' = '" + user() + "',\n"
+                        + "  'password' = '" + pass() + "',\n"
+                        + "  'graph' = '" + GRAPH + "',\n"
+                        + "  'element.type' = 'vertex',\n"
+                        + "  'vertex.label' = '" + V + "',\n"
+                        + "  'sink.batch.size' = '1'\n"
+                        + ")");
+
+        tEnv.executeSql("INSERT INTO company_vertex SELECT company_id, name FROM src").await();
+
+        assertThat(count("MATCH (n:" + V + ") RETURN count(n) AS c")).isEqualTo(1L);
+        assertThat(single("MATCH (n:" + V + " {company_id:'p2'}) RETURN n.name AS v")).isEqualTo("Beta");
     }
 
     private static long count(String cypher) {

@@ -39,6 +39,15 @@ public interface ElementConverter<InputT> extends Serializable {
      */
     GraphElement convert(InputT record);
 
+    /**
+     * @param record an upstream record
+     * @return {@code true} if the record represents a deletion (the element should be removed)
+     *         rather than an upsert. Defaults to {@code false} (upsert / append).
+     */
+    default boolean isDelete(InputT record) {
+        return false;
+    }
+
     /** @return the identity converter for streams that already emit {@link GraphElement}s. */
     static <T extends GraphElement> ElementConverter<T> identity() {
         return record -> record;

@@ -35,21 +35,25 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
- * Buffers graph elements and flushes them to TuGraph in idempotent {@code MERGE} batches.
+ * Buffers graph change operations and flushes them to TuGraph as idempotent {@code MERGE} (upsert)
+ * or {@code DELETE} statements.
+ *
+ * <p><b>Changelog.</b> Each buffered record carries whether it is an upsert or a delete (derived
+ * from the Flink {@code RowKind} on the Table path, or always upsert for the DataStream identity
+ * path). The buffer is flushed <em>in arrival order</em> so an insert-then-delete (or vice versa)
+ * of the same key reaches TuGraph in the correct order. TuGraph requires one statement per element
+ * (it rejects {@code UNWIND}-batched writes), which makes in-order processing the natural choice.
  *
  * <p><b>Threading.</b> {@link #write}, {@link #flush} and the processing-time callback all run on
  * the single task thread (Flink's mailbox), so the buffer needs no synchronization.
  *
  * <p><b>Flush triggers.</b> (1) the buffer reaching {@link TuGraphSinkOptions#batchSize()};
  * (2) a processing-time timer every {@link TuGraphSinkOptions#batchIntervalMs()} (when &gt; 0);
- * (3) Flink calling {@link #flush(boolean)} on every checkpoint and at end of input. Because a
- * checkpoint barrier triggers {@code flush}, every record buffered before the barrier is durably
- * written before the checkpoint completes — giving at-least-once delivery.
+ * (3) Flink calling {@link #flush(boolean)} on every checkpoint and at end of input — giving
+ * at-least-once delivery.
  *
  * @param <InputT> upstream record type
  */
@@ -57,7 +61,16 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
 
     private static final Logger LOG = LoggerFactory.getLogger(TuGraphSinkWriter.class);
 
-    private static final char KEY_SEP = '\u0001';
+    /** A buffered change operation: a graph element plus whether it is a delete. */
+    private static final class Op {
+        final GraphElement element;
+        final boolean delete;
+
+        Op(GraphElement element, boolean delete) {
+            this.element = element;
+            this.delete = delete;
+        }
+    }
 
     private final TuGraphSinkOptions options;
     private final ElementConverter<InputT> converter;
@@ -65,12 +78,13 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
     private final TuGraphConnection connection;
     private final ProcessingTimeService timeService;
 
-    private final List<GraphElement> buffer;
+    private final List<Op> buffer;
 
     // ---- Metrics ----
     private final Counter numRecordsSend;
     private final Counter flushCounter;
     private final Counter edgeSkippedCounter;
+    private final Counter deletedCounter;
     private volatile long lastFlushLatencyMs;
 
     private boolean closed;
@@ -93,6 +107,7 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
         MetricGroup tg = metricGroup.addGroup("tugraph");
         this.flushCounter = tg.counter("flushCount");
         this.edgeSkippedCounter = tg.counter("edgeSkipped");
+        this.deletedCounter = tg.counter("deleted");
         tg.gauge("flushLatencyMs", () -> lastFlushLatencyMs);
 
         scheduleNextTimer();
@@ -102,9 +117,9 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
     public void write(InputT element, Context context) throws IOException, InterruptedException {
         GraphElement converted = converter.convert(element);
         if (converted == null) {
-            return;
+            return; // dropped (e.g. the UPDATE_BEFORE half of a changelog update)
         }
-        buffer.add(converted);
+        buffer.add(new Op(converted, converter.isDelete(element)));
         if (buffer.size() >= options.batchSize()) {
             flushBuffer();
         }
@@ -115,76 +130,68 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
         flushBuffer();
     }
 
-    /** Group the buffer by element kind and label, emit one batch statement per group. */
+    /** Turn the buffer into ordered upsert/delete statements and write them in one Bolt session. */
     private void flushBuffer() throws IOException {
         if (buffer.isEmpty()) {
             return;
         }
         long startNanos = System.nanoTime();
 
-        // Preserve first-seen order so output is deterministic and easy to reason about.
-        Map<String, List<Vertex>> vertexGroups = new LinkedHashMap<>();
-        Map<String, List<Edge>> edgeGroups = new LinkedHashMap<>();
-        for (GraphElement e : buffer) {
+        List<CypherStatement> statements = new ArrayList<>(buffer.size());
+        int edgeUpserts = 0;
+        int deletes = 0;
+        for (Op op : buffer) {
+            GraphElement e = op.element;
             if (e instanceof Vertex) {
                 Vertex v = (Vertex) e;
-                vertexGroups.computeIfAbsent(v.label() + KEY_SEP + v.primaryKey(),
-                        k -> new ArrayList<>()).add(v);
+                if (op.delete) {
+                    statements.addAll(cypherBuilder.buildVertexDelete(v.label(), v.primaryKey(), List.of(v)));
+                    deletes++;
+                } else {
+                    statements.addAll(cypherBuilder.buildVertexUpsert(v.label(), v.primaryKey(), List.of(v)));
+                }
             } else if (e instanceof Edge) {
-                Edge edge = (Edge) e;
-                String key = String.join(String.valueOf(KEY_SEP),
-                        edge.label(), edge.srcLabel(), edge.srcKey(), edge.dstLabel(), edge.dstKey());
-                edgeGroups.computeIfAbsent(key, k -> new ArrayList<>()).add(edge);
+                Edge ed = (Edge) e;
+                if (op.delete) {
+                    statements.addAll(cypherBuilder.buildEdgeDelete(ed.label(), ed.srcLabel(), ed.srcKey(),
+                            ed.dstLabel(), ed.dstKey(), List.of(ed)));
+                    deletes++;
+                } else {
+                    statements.addAll(cypherBuilder.buildEdgeUpsert(ed.label(), ed.srcLabel(), ed.srcKey(),
+                            ed.dstLabel(), ed.dstKey(), List.of(ed)));
+                    edgeUpserts++;
+                }
             } else {
                 throw new IOException("Unsupported graph element type: " + e.getClass().getName());
             }
         }
 
-        long written = 0L;
-        for (List<Vertex> group : vertexGroups.values()) {
-            Vertex sample = group.get(0);
-            List<CypherStatement> statements = cypherBuilder.buildVertexUpsert(
-                    sample.label(), sample.primaryKey(), group);
-            connection.writeBatch(statements);
-            written += group.size();
-        }
-        for (List<Edge> group : edgeGroups.values()) {
-            written += flushEdgeGroup(group);
+        long writtenEdges = connection.writeBatch(statements);
+
+        long skipped = 0;
+        if (edgeUpserts > 0 && writtenEdges != TuGraphConnection.NO_WRITTEN_COUNT) {
+            skipped = edgeUpserts - writtenEdges;
+            if (skipped > 0) {
+                if (options.onMissingEndpoint() == OnMissingEndpoint.FAIL) {
+                    throw new IOException(skipped + " edge(s) could not be written because an endpoint"
+                            + " vertex was missing (edge.on-missing-endpoint=fail)");
+                }
+                edgeSkippedCounter.inc(skipped);
+                LOG.warn("Skipped {} edge(s) due to missing endpoint vertices", skipped);
+            }
         }
 
-        int flushed = buffer.size();
+        int total = buffer.size();
         buffer.clear();
 
-        numRecordsSend.inc(written);
+        numRecordsSend.inc(total - skipped);
+        if (deletes > 0) {
+            deletedCounter.inc(deletes);
+        }
         flushCounter.inc();
         lastFlushLatencyMs = (System.nanoTime() - startNanos) / 1_000_000L;
-        LOG.debug("Flushed {} buffered elements ({} written) to TuGraph in {} ms",
-                flushed, written, lastFlushLatencyMs);
-    }
-
-    /** Write one edge group and apply the missing-endpoint policy. @return edges actually written. */
-    private long flushEdgeGroup(List<Edge> group) throws IOException {
-        Edge sample = group.get(0);
-        List<CypherStatement> statements = cypherBuilder.buildEdgeUpsert(
-                sample.label(), sample.srcLabel(), sample.srcKey(),
-                sample.dstLabel(), sample.dstKey(), group);
-        long writtenCount = connection.writeBatch(statements);
-        if (writtenCount == TuGraphConnection.NO_WRITTEN_COUNT) {
-            // The statement did not report a count; assume all were written.
-            return group.size();
-        }
-        long skipped = group.size() - writtenCount;
-        if (skipped > 0) {
-            if (options.onMissingEndpoint() == OnMissingEndpoint.FAIL) {
-                throw new IOException(skipped + " edge(s) of label '" + sample.label()
-                        + "' could not be written because an endpoint vertex was missing"
-                        + " (edge.on-missing-endpoint=fail)");
-            }
-            edgeSkippedCounter.inc(skipped);
-            LOG.warn("Skipped {} edge(s) of label '{}' due to missing endpoint vertices",
-                    skipped, sample.label());
-        }
-        return writtenCount;
+        LOG.debug("Flushed {} ops ({} deletes, {} edges skipped) to TuGraph in {} ms",
+                total, deletes, skipped, lastFlushLatencyMs);
     }
 
     /** Register the next processing-time flush timer if time-based flushing is enabled. */

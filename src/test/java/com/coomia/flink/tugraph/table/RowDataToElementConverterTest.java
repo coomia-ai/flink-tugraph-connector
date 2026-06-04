@@ -25,6 +25,7 @@ import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.types.RowKind;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -131,5 +132,30 @@ class RowDataToElementConverterTest {
 
         Vertex v = (Vertex) converter.convert(row);
         assertThat(v.properties().get("d")).isEqualTo("2026-06-04");
+    }
+
+    @Test
+    void convertSkipsUpdateBefore() {
+        RowDataToElementConverter c = vertexConverter();
+        GenericRowData row = GenericRowData.ofKind(
+                RowKind.UPDATE_BEFORE, StringData.fromString("v1"), StringData.fromString("A"));
+        assertThat(c.convert(row)).isNull();
+    }
+
+    @Test
+    void isDeleteReflectsRowKind() {
+        RowDataToElementConverter c = vertexConverter();
+        GenericRowData del = GenericRowData.ofKind(
+                RowKind.DELETE, StringData.fromString("v1"), StringData.fromString("A"));
+        GenericRowData ins = GenericRowData.of(StringData.fromString("v1"), StringData.fromString("A"));
+        assertThat(c.isDelete(del)).isTrue();
+        assertThat(c.isDelete(ins)).isFalse();
+    }
+
+    private static RowDataToElementConverter vertexConverter() {
+        String[] names = {"id", "name"};
+        LogicalType[] types = {DataTypes.STRING().getLogicalType(), DataTypes.STRING().getLogicalType()};
+        return RowDataToElementConverter.builder()
+                .elementType(ElementType.VERTEX).schema(names, types).vertex("V", 0).build();
     }
 }

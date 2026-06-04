@@ -27,6 +27,7 @@ import org.apache.flink.table.types.logical.DecimalType;
 import org.apache.flink.table.types.logical.LocalZonedTimestampType;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.TimestampType;
+import org.apache.flink.types.RowKind;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -80,7 +81,16 @@ public class RowDataToElementConverter implements ElementConverter<RowData> {
 
     @Override
     public GraphElement convert(RowData row) {
+        if (row.getRowKind() == RowKind.UPDATE_BEFORE) {
+            // Drop the retract half of an update; the paired UPDATE_AFTER performs the upsert.
+            return null;
+        }
         return elementType == ElementType.VERTEX ? toVertex(row) : toEdge(row);
+    }
+
+    @Override
+    public boolean isDelete(RowData row) {
+        return row.getRowKind() == RowKind.DELETE;
     }
 
     private Vertex toVertex(RowData row) {

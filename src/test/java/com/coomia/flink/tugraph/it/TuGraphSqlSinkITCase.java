@@ -19,8 +19,13 @@ package com.coomia.flink.tugraph.it;
 
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.TableEnvironment;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.neo4j.driver.AuthTokens;
+import org.neo4j.driver.Driver;
+import org.neo4j.driver.GraphDatabase;
+import org.neo4j.driver.Session;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
@@ -36,6 +41,17 @@ class TuGraphSqlSinkITCase {
 
     @Container
     private static final TuGraphTestContainer TUGRAPH = new TuGraphTestContainer();
+
+    @BeforeAll
+    static void createSchema() {
+        try (Driver d = GraphDatabase.driver(TUGRAPH.boltUri(),
+                AuthTokens.basic(TuGraphTestContainer.username(), TuGraphTestContainer.password()));
+                Session s = d.session()) {
+            s.run("CALL db.createVertexLabel('Company', 'company_id', 'company_id', 'STRING', false, 'name', 'STRING', true, 'reg_capital', 'DOUBLE', true)").consume();
+            s.run("CALL db.createEdgeLabel('INVEST', '[]', 'ratio', 'DOUBLE', true)").consume();
+        }
+    }
+
 
     @Test
     void insertsVerticesAndEdgesViaSql() throws Exception {

@@ -134,6 +134,28 @@ class MergeCypherStatementBuilderTest {
     }
 
     @Test
+    void vertexDelete_buildsDetachDeletePerVertex() {
+        List<CypherStatement> stmts = builder.buildVertexDelete(
+                "Company", "company_id",
+                List.of(new Vertex("Company", "company_id", "c1", Map.of("company_id", "c1"))));
+        assertThat(stmts).hasSize(1);
+        assertThat(stmts.get(0).cypher())
+                .isEqualTo("MATCH (n:Company {company_id: $pk}) DETACH DELETE n");
+        assertThat(stmts.get(0).parameters()).containsEntry("pk", "c1");
+    }
+
+    @Test
+    void edgeDelete_buildsMatchDeletePerEdge() {
+        Edge edge = new Edge("INVEST",
+                "Company", "company_id", "c1", "Company", "company_id", "c2", Map.of());
+        List<CypherStatement> stmts = builder.buildEdgeDelete(
+                "INVEST", "Company", "company_id", "Company", "company_id", List.of(edge));
+        assertThat(stmts).hasSize(1);
+        assertThat(stmts.get(0).cypher()).isEqualTo(
+                "MATCH (a:Company {company_id: $_src})-[e:INVEST]->(b:Company {company_id: $_dst}) DELETE e");
+        assertThat(stmts.get(0).parameters()).containsEntry("_src", "c1").containsEntry("_dst", "c2");
+    }
+    @Test
     void invalidIdentifier_isRejected() {
         // TuGraph has no identifier quoting, so unsafe names (e.g. with a space or backtick) are refused.
         assertThatThrownBy(() -> builder.buildVertexUpsert(

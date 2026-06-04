@@ -23,6 +23,7 @@ import org.apache.flink.table.connector.ChangelogMode;
 import org.apache.flink.table.connector.sink.DynamicTableSink;
 import org.apache.flink.table.connector.sink.SinkV2Provider;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.types.RowKind;
 
 import java.util.Objects;
 
@@ -39,15 +40,27 @@ public class TuGraphDynamicTableSink implements DynamicTableSink {
 
     private final TuGraphSinkOptions options;
     private final RowDataToElementConverter converter;
+    private final boolean supportsDelete;
 
-    public TuGraphDynamicTableSink(TuGraphSinkOptions options, RowDataToElementConverter converter) {
+    public TuGraphDynamicTableSink(TuGraphSinkOptions options, RowDataToElementConverter converter,
+                                   boolean supportsDelete) {
         this.options = Objects.requireNonNull(options, "options");
         this.converter = Objects.requireNonNull(converter, "converter");
+        this.supportsDelete = supportsDelete;
     }
 
     @Override
     public ChangelogMode getChangelogMode(ChangelogMode requestedMode) {
-        return ChangelogMode.insertOnly();
+        if (!supportsDelete) {
+            // Edge tables have no primary key, so they only accept appended / upserted rows.
+            return ChangelogMode.insertOnly();
+        }
+        // Vertex tables (with a primary key) accept a full upsert changelog (insert/update/delete).
+        return ChangelogMode.newBuilder()
+                .addContainedKind(RowKind.INSERT)
+                .addContainedKind(RowKind.UPDATE_AFTER)
+                .addContainedKind(RowKind.DELETE)
+                .build();
     }
 
     @Override
@@ -58,7 +71,7 @@ public class TuGraphDynamicTableSink implements DynamicTableSink {
     @Override
     public DynamicTableSink copy() {
         // options and converter are immutable, so sharing references is safe.
-        return new TuGraphDynamicTableSink(options, converter);
+        return new TuGraphDynamicTableSink(options, converter, supportsDelete);
     }
 
     @Override

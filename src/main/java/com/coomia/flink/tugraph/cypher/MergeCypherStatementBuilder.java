@@ -120,6 +120,46 @@ public class MergeCypherStatementBuilder implements CypherStatementBuilder {
         return statements;
     }
 
+    @Override
+    public List<CypherStatement> buildVertexDelete(String label, String primaryKey, List<Vertex> batch) {
+        requireNonEmpty(batch, "vertex delete batch");
+        String l = identifier(label, "vertex label");
+        String pk = identifier(primaryKey, "primary key");
+        // DETACH so any attached edges are removed with the vertex; a missing key is a no-op.
+        String cypher = "MATCH (n:" + l + " {" + pk + ": $" + PK_PARAM + "}) DETACH DELETE n";
+
+        List<CypherStatement> statements = new ArrayList<>(batch.size());
+        for (Vertex v : batch) {
+            Map<String, Object> params = new LinkedHashMap<>(1);
+            params.put(PK_PARAM, v.primaryKeyValue());
+            statements.add(new CypherStatement(cypher, params));
+        }
+        return statements;
+    }
+
+    @Override
+    public List<CypherStatement> buildEdgeDelete(String edgeLabel,
+                                                 String srcLabel, String srcKey,
+                                                 String dstLabel, String dstKey,
+                                                 List<Edge> batch) {
+        requireNonEmpty(batch, "edge delete batch");
+        String e = identifier(edgeLabel, "edge label");
+        String sl = identifier(srcLabel, "edge source label");
+        String sk = identifier(srcKey, "edge source key");
+        String dl = identifier(dstLabel, "edge destination label");
+        String dk = identifier(dstKey, "edge destination key");
+        String cypher = "MATCH (a:" + sl + " {" + sk + ": $" + SRC_PARAM + "})-[e:" + e + "]->"
+                + "(b:" + dl + " {" + dk + ": $" + DST_PARAM + "}) DELETE e";
+
+        List<CypherStatement> statements = new ArrayList<>(batch.size());
+        for (Edge edge : batch) {
+            Map<String, Object> params = new LinkedHashMap<>(2);
+            params.put(SRC_PARAM, edge.srcValue());
+            params.put(DST_PARAM, edge.dstValue());
+            statements.add(new CypherStatement(cypher, params));
+        }
+        return statements;
+    }
     /** Append a {@code SET alias.key = $p_key, ...} clause for the given keys and bind their params. */
     private void appendSet(StringBuilder cypher, String alias, List<String> keys,
                            Map<String, Object> properties, Map<String, Object> params) {
