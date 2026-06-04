@@ -6,10 +6,8 @@ build/
 # Claude Code agent settings
 .claude/
 
-# Internal planning docs (kept locally, not part of the public repo)
-/docs/REQUIREMENTS.md
-/docs/EVALUATION.md
-/docs/TASKS.md
+# docs/ holds local background / planning context — not part of the public repo
+/docs/
 
 # IDE
 .idea/

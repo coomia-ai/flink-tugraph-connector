@@ -246,6 +246,9 @@ Integration tests (`*IT` / `*ITCase`) boot a TuGraph container with
 [Testcontainers](https://testcontainers.com/) and are skipped unless `TUGRAPH_IT=1`. Override the
 image with `TUGRAPH_IMAGE` and credentials with `TUGRAPH_USERNAME` / `TUGRAPH_PASSWORD`.
 
+For the shaded-jar layout, cluster deployment and the performance benchmark, see
+[PACKAGING.md](PACKAGING.md).
+
 ## Roadmap
 
 - **v0.2** — bounded `ScanTableSource`, `LookupTableSource` with `LookupCache`, projection/filter
