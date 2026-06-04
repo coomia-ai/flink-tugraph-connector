@@ -65,6 +65,14 @@ oriented Bolt-based implementation modelled on the maturity of `nebula-flink-con
 
 ## Quick start
 
+### Start TuGraph locally (optional)
+
+A [`docker-compose.yml`](docker-compose.yml) is included to boot a local TuGraph-DB:
+
+```bash
+docker compose up -d    # Bolt at bolt://127.0.0.1:7687 (admin / 73@TuGraph), console at :7070
+```
+
 ### Build
 
 ```bash
@@ -289,6 +297,14 @@ TuGraph-DB 没有官方 Flink 连接器，本项目以 `nebula-flink-connector` 
 | neo4j-java-driver（Bolt） | 4.4.x |
 | Java | 21 |
 | Gradle | 8.10（已内置 wrapper） |
+
+### 本地启动 TuGraph（可选）
+
+仓库内置 [`docker-compose.yml`](docker-compose.yml)，可一键拉起本地 TuGraph-DB：
+
+```bash
+docker compose up -d    # Bolt 端口 bolt://127.0.0.1:7687（admin / 73@TuGraph），控制台 :7070
+```
 
 ### 构建
 

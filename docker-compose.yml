@@ -1,0 +1,40 @@
+# Standalone TuGraph-DB for trying out the connector locally.
+#
+#   docker compose up -d        # start
+#   docker compose down         # stop (keeps data volume)
+#   docker compose down -v      # stop and delete data
+#
+# Once healthy, the connector reaches it at:
+#   Bolt   : bolt://127.0.0.1:7687   (user: admin, password: 73@TuGraph)
+#   Console: http://127.0.0.1:7070
+#
+# The connector requires a Bolt-capable TuGraph 4.x. Override the image / credentials with
+# TUGRAPH_IMAGE, TUGRAPH_USER and TUGRAPH_PASSWORD (e.g. in a .env file) if needed.
+
+services:
+  tugraph:
+    image: ${TUGRAPH_IMAGE:-tugraph/tugraph-runtime-centos7:4.5.0}
+    container_name: tugraph
+    hostname: tugraph
+    ports:
+      - "7070:7070"      # HTTP / web console
+      - "7687:7687"      # Bolt — used by this connector
+      - "9091:9090"      # RPC
+    volumes:
+      - tugraph_data:/var/lib/lgraph/data
+      # Optional: mount your own server config (read-only). Leave commented to use image defaults.
+      # - ./config/tugraph/:/usr/local/tugraph/config/:ro
+    environment:
+      LGRAPH_USER: ${TUGRAPH_USER:-admin}
+      LGRAPH_PASSWORD: ${TUGRAPH_PASSWORD:-73@TuGraph}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7070/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    tty: true
+
+volumes:
+  tugraph_data:
