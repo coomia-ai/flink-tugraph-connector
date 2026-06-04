@@ -24,6 +24,8 @@ oriented Bolt-based implementation modelled on the maturity of `nebula-flink-con
   the same writer, batching and connection layer.
 - **Idempotent writes** — every vertex/edge is written with `MERGE`, so an at-least-once pipeline is
   **effectively exactly-once at the business level** (no duplicate vertices or edges on replay).
+- **Changelog / CDC** — consumes Flink's full changelog (INSERT / UPDATE / DELETE): upserts become
+  `MERGE`, deletes become `DELETE`, applied in arrival order — so a CDC source keeps the graph in sync.
 - **Batched & back-pressuring** — flushes by size or time, and on every checkpoint barrier; the
   synchronous flush naturally back-pressures the upstream.
 - **Fault tolerant** — transient Bolt failures are retried with exponential backoff; exhausted
@@ -42,6 +44,8 @@ oriented Bolt-based implementation modelled on the maturity of `nebula-flink-con
 | API | DataStream `Sink<T>` | ✅ v0.1 |
 | API | Table/SQL `DynamicTableSink` | ✅ v0.1 |
 | Direction | Sink (write) | ✅ v0.1 |
+| Write mode | Upsert (`MERGE`) for vertices and edges | ✅ v0.1 |
+| Write mode | Delete / changelog (INSERT/UPDATE/DELETE) | ✅ v0.1 |
 | Direction | Source (bounded scan) | 🟡 v0.2 (planned) |
 | Dim. table | `LookupTableSource` + cache | 🟡 v0.2 (planned) |
 | Consistency | at-least-once + idempotent `MERGE` | ✅ v0.1 |
@@ -189,6 +193,21 @@ CREATE TABLE invest_edge (
 > `edge.src.col` is the **table column** carrying the endpoint key value; `edge.src.key` is the
 > **vertex property** it is matched against (defaults to `edge.src.col` when omitted).
 
+## Changelog & deletes
+
+Vertex tables declare a **primary key**, so they accept Flink's full **upsert changelog**: `INSERT`
+and `UPDATE_AFTER` become idempotent `MERGE`s, and `DELETE` becomes `MATCH … DETACH DELETE`. Point a
+CDC source (Flink CDC, Debezium/Kafka, …) at a vertex table and the graph stays in sync, deletions
+included. Edge tables have no primary key and are **append / upsert only** (insert-only changelog).
+
+Operations are applied **in arrival order** within each flush, so an insert-then-delete of the same
+key resolves correctly.
+
+```sql
+-- a CDC (changelog) source keeps :Company vertices in sync, including deletes
+INSERT INTO company_vertex SELECT company_id, name, reg_capital FROM company_cdc;
+```
+
 ## Configuration
 
 | Key | Required | Default | Description |
@@ -244,6 +263,7 @@ CREATE TABLE invest_edge (
 | `tugraph.flushCount` | counter | number of flush operations |
 | `tugraph.flushLatencyMs` | gauge | last flush latency (ms) |
 | `tugraph.edgeSkipped` | counter | edges skipped due to missing endpoints |
+| `tugraph.deleted` | counter | elements deleted (changelog DELETE) |
 
 ## Architecture
 
@@ -314,6 +334,8 @@ TuGraph-DB 没有官方 Flink 连接器，本项目以 `nebula-flink-connector` 
   writer、攒批与连接层。
 - **幂等写入**：点 / 边均以 `MERGE` 写入，因此 at-least-once 管线在**业务层等价于 exactly-once**
   （故障重放不会产生重复点边）。
+- **Changelog / CDC**：消费 Flink 完整 changelog（INSERT/UPDATE/DELETE）—— upsert 走 `MERGE`、删除走
+  `DELETE`，按到达顺序应用，CDC 源可让图实时同步（含删除）。
 - **攒批与反压**：按条数、时间以及每次 checkpoint barrier 触发 flush；同步刷写天然对上游反压。
 - **容错**：Bolt 瞬时错误指数退避重试；重试耗尽则重启作业，幂等 `MERGE` 吸收重放。
 - **可插拔 Cypher 方言**：Cypher 生成位于 `CypherStatementBuilder` 之后，若目标 TuGraph 不支持
@@ -404,6 +426,12 @@ vertices.sinkTo(TuGraphSink.<Vertex>builder()
 ### 配置项、类型映射、指标
 
 详见上文英文表格（配置项 / 类型映射 / 指标含义一致）。
+
+### Changelog 与删除
+
+点表声明了**主键**，因此接受 Flink 完整 **upsert changelog**：`INSERT`/`UPDATE_AFTER` → 幂等 `MERGE`，
+`DELETE` → `MATCH … DETACH DELETE`。把 CDC 源（Flink CDC、Debezium/Kafka 等）接到点表，图即实时同步
+（含删除）。边表无主键，为 **append / upsert only**（insert-only）。同一次 flush 内按到达顺序应用。
 
 ### 一致性与容错
 

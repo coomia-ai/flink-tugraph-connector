@@ -11,6 +11,10 @@ All notable changes to this project are documented here. The format is based on
 ### Added
 - **DataStream `Sink<T>`** (Flink Sink V2) writing vertices and edges to TuGraph-DB over Bolt, with
   a fluent `TuGraphSink.builder()`.
+- **Changelog / CDC support** — vertex tables consume Flink's full upsert changelog: `INSERT` /
+  `UPDATE_AFTER` become idempotent `MERGE`, `DELETE` becomes `MATCH … DETACH DELETE`, edges deleted
+  with `MATCH … DELETE`. Operations are applied in arrival order; a `tugraph.deleted` metric is
+  exposed. Verified end-to-end via a Flink SQL changelog against live TuGraph-DB 4.x.
 - **Table/SQL `DynamicTableSink`** under `'connector' = 'tugraph'`, discovered via SPI, sharing the
   same writer runtime as the DataStream path.
 - **Idempotent `MERGE` writes** for at-least-once delivery that is effectively exactly-once at the
