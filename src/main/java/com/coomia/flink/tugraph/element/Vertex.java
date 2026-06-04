@@ -23,14 +23,14 @@ import java.util.Objects;
 /**
  * A graph vertex.
  *
- * <p>Write semantics (idempotent upsert):
- * {@code MERGE (n:label {primaryKey: <pkValue>}) SET n += properties}.
+ * <p>Write semantics (idempotent upsert): {@code MERGE (n:label {primaryKey: <pkValue>}) SET ...}.
+ * Call {@link #asDelete()} to emit a deletion instead ({@code MATCH ... DETACH DELETE n}).
  *
  * @see com.coomia.flink.tugraph.cypher.MergeCypherStatementBuilder
  */
 public final class Vertex extends GraphElement {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
 
     private final String primaryKey;
     private final Object primaryKeyValue;
@@ -43,12 +43,17 @@ public final class Vertex extends GraphElement {
      *                        skipped at write time)
      */
     public Vertex(String label, String primaryKey, Object primaryKeyValue, Map<String, Object> properties) {
-        super(Objects.requireNonNull(label, "label"), properties);
+        this(label, primaryKey, primaryKeyValue, properties, ChangeOp.UPSERT);
+    }
+
+    public Vertex(String label, String primaryKey, Object primaryKeyValue,
+                  Map<String, Object> properties, ChangeOp op) {
+        super(Objects.requireNonNull(label, "label"), properties, op);
         this.primaryKey = Objects.requireNonNull(primaryKey, "primaryKey");
         this.primaryKeyValue = primaryKeyValue;
     }
 
-    /** Convenience factory mirroring the constructor. */
+    /** Convenience factory mirroring the constructor (upsert). */
     public static Vertex of(String label, String primaryKey, Object primaryKeyValue, Map<String, Object> properties) {
         return new Vertex(label, primaryKey, primaryKeyValue, properties);
     }
@@ -68,6 +73,13 @@ public final class Vertex extends GraphElement {
         return primaryKeyValue;
     }
 
+    /** @return a copy of this vertex marked for deletion (no-op if already a delete). */
+    public Vertex asDelete() {
+        return op == ChangeOp.DELETE
+                ? this
+                : new Vertex(label, primaryKey, primaryKeyValue, properties, ChangeOp.DELETE);
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -78,6 +90,7 @@ public final class Vertex extends GraphElement {
         }
         Vertex vertex = (Vertex) o;
         return label.equals(vertex.label)
+                && op == vertex.op
                 && primaryKey.equals(vertex.primaryKey)
                 && Objects.equals(primaryKeyValue, vertex.primaryKeyValue)
                 && properties.equals(vertex.properties);
@@ -85,12 +98,12 @@ public final class Vertex extends GraphElement {
 
     @Override
     public int hashCode() {
-        return Objects.hash(label, primaryKey, primaryKeyValue, properties);
+        return Objects.hash(label, op, primaryKey, primaryKeyValue, properties);
     }
 
     @Override
     public String toString() {
-        return "Vertex{label=" + label + ", " + primaryKey + "=" + primaryKeyValue
+        return "Vertex{" + op + ", label=" + label + ", " + primaryKey + "=" + primaryKeyValue
                 + ", props=" + properties.size() + "}";
     }
 }

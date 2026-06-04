@@ -15,6 +15,8 @@ All notable changes to this project are documented here. The format is based on
   `UPDATE_AFTER` become idempotent `MERGE`, `DELETE` becomes `MATCH … DETACH DELETE`, edges deleted
   with `MATCH … DELETE`. Operations are applied in arrival order; a `tugraph.deleted` metric is
   exposed. Verified end-to-end via a Flink SQL changelog against live TuGraph-DB 4.x.
+- **DataStream delete API** — `GraphElement` carries a change op (like Flink's `RowKind`); emit
+  `vertex.asDelete()` / `edge.asDelete()` to delete from the DataStream API, matching the SQL path.
 - **Table/SQL `DynamicTableSink`** under `'connector' = 'tugraph'`, discovered via SPI, sharing the
   same writer runtime as the DataStream path.
 - **Idempotent `MERGE` writes** for at-least-once delivery that is effectively exactly-once at the

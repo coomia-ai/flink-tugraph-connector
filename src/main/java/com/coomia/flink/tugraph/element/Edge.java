@@ -26,17 +26,17 @@ import java.util.Objects;
  * <p>Write semantics (idempotent upsert):
  * <pre>
  *   MATCH (a:srcLabel {srcKey: srcValue}), (b:dstLabel {dstKey: dstValue})
- *   MERGE (a)-[e:label]-&gt;(b) SET e += properties
+ *   MERGE (a)-[e:label]-&gt;(b) SET ...
  * </pre>
  *
- * <p>When an endpoint is missing (the source or destination vertex has not been written yet) the
- * behaviour is governed by the {@code edge.on-missing-endpoint} option (skip / fail).
+ * <p>Call {@link #asDelete()} to emit a deletion instead ({@code MATCH (a)-[e]->(b) DELETE e}).
+ * When an endpoint is missing the behaviour is governed by {@code edge.on-missing-endpoint}.
  *
  * @see com.coomia.flink.tugraph.cypher.MergeCypherStatementBuilder
  */
 public final class Edge extends GraphElement {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
 
     private final String srcLabel;
     private final String srcKey;
@@ -59,7 +59,14 @@ public final class Edge extends GraphElement {
                 String srcLabel, String srcKey, Object srcValue,
                 String dstLabel, String dstKey, Object dstValue,
                 Map<String, Object> properties) {
-        super(Objects.requireNonNull(label, "label"), properties);
+        this(label, srcLabel, srcKey, srcValue, dstLabel, dstKey, dstValue, properties, ChangeOp.UPSERT);
+    }
+
+    public Edge(String label,
+                String srcLabel, String srcKey, Object srcValue,
+                String dstLabel, String dstKey, Object dstValue,
+                Map<String, Object> properties, ChangeOp op) {
+        super(Objects.requireNonNull(label, "label"), properties, op);
         this.srcLabel = Objects.requireNonNull(srcLabel, "srcLabel");
         this.srcKey = Objects.requireNonNull(srcKey, "srcKey");
         this.srcValue = srcValue;
@@ -97,6 +104,14 @@ public final class Edge extends GraphElement {
         return dstValue;
     }
 
+    /** @return a copy of this edge marked for deletion (no-op if already a delete). */
+    public Edge asDelete() {
+        return op == ChangeOp.DELETE
+                ? this
+                : new Edge(label, srcLabel, srcKey, srcValue, dstLabel, dstKey, dstValue, properties,
+                        ChangeOp.DELETE);
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -107,6 +122,7 @@ public final class Edge extends GraphElement {
         }
         Edge edge = (Edge) o;
         return label.equals(edge.label)
+                && op == edge.op
                 && srcLabel.equals(edge.srcLabel)
                 && srcKey.equals(edge.srcKey)
                 && Objects.equals(srcValue, edge.srcValue)
@@ -118,12 +134,12 @@ public final class Edge extends GraphElement {
 
     @Override
     public int hashCode() {
-        return Objects.hash(label, srcLabel, srcKey, srcValue, dstLabel, dstKey, dstValue, properties);
+        return Objects.hash(label, op, srcLabel, srcKey, srcValue, dstLabel, dstKey, dstValue, properties);
     }
 
     @Override
     public String toString() {
-        return "Edge{(" + srcLabel + ":" + srcValue + ")-[" + label + "]->("
+        return "Edge{" + op + ", (" + srcLabel + ":" + srcValue + ")-[" + label + "]->("
                 + dstLabel + ":" + dstValue + "), props=" + properties.size() + "}";
     }
 }

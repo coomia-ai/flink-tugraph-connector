@@ -226,6 +226,29 @@ class TuGraphConnectorLiveIT {
         assertThat(single("MATCH (n:" + V + " {company_id:'p2'}) RETURN n.name AS v")).isEqualTo("Beta");
     }
 
+    @Test
+    void deletesVerticesViaDataStreamApi() throws Exception {
+        // Upsert p1 and p2.
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        env.fromData(vertices().get(0), vertices().get(1))
+                .sinkTo(TuGraphSink.<Vertex>builder()
+                        .uri(uri()).auth(user(), pass()).graph(GRAPH).batchSize(2).build());
+        env.execute("tugraph-live-upsert-job");
+        assertThat(count("MATCH (n:" + V + ") RETURN count(n) AS c")).isEqualTo(2L);
+
+        // Delete p1 via the DataStream delete API (vertex.asDelete()).
+        StreamExecutionEnvironment env2 = StreamExecutionEnvironment.getExecutionEnvironment();
+        env2.setParallelism(1);
+        env2.fromData(vertices().get(0).asDelete())
+                .sinkTo(TuGraphSink.<Vertex>builder()
+                        .uri(uri()).auth(user(), pass()).graph(GRAPH).batchSize(1).build());
+        env2.execute("tugraph-live-delete-job");
+
+        assertThat(count("MATCH (n:" + V + ") RETURN count(n) AS c")).isEqualTo(1L);
+        assertThat(single("MATCH (n:" + V + " {company_id:'p2'}) RETURN n.name AS v")).isEqualTo("Beta");
+    }
+
     private static long count(String cypher) {
         try (Session s = driver.session(SessionConfig.forDatabase(GRAPH))) {
             return s.run(cypher).single().get("c").asLong();

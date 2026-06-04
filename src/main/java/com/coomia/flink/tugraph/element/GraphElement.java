@@ -24,22 +24,31 @@ import java.util.Map;
 /**
  * Base type for a graph element ({@link Vertex} or {@link Edge}).
  *
- * <p>The sink buffers writes in units of {@code GraphElement}. On flush they are grouped by
- * {@link Kind} and {@code label} (plus endpoint labels for edges) and turned into a single
- * parameterized batch Cypher statement by the
+ * <p>The sink buffers writes in units of {@code GraphElement}. On flush each is turned into a
+ * parameterized {@code MERGE} (for {@link ChangeOp#UPSERT}) or {@code DELETE} (for
+ * {@link ChangeOp#DELETE}) statement by the
  * {@code com.coomia.flink.tugraph.cypher.CypherStatementBuilder}.
+ *
+ * <p>The {@link #op()} acts like Flink's {@code RowKind} for the DataStream API: elements are
+ * upserts by default; call {@code asDelete()} on a {@link Vertex}/{@link Edge} to emit a deletion.
  *
  * <p>Instances are immutable and {@link Serializable} so they can be carried through Flink's
  * record pipeline and checkpointed buffers.
  */
 public abstract class GraphElement implements Serializable {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
 
     /** Discriminator for the two element kinds. */
     public enum Kind {
         VERTEX,
         EDGE
+    }
+
+    /** The change an element represents: an upsert (default) or a delete. */
+    public enum ChangeOp {
+        UPSERT,
+        DELETE
     }
 
     /** Element label (TuGraph vertex/edge label). Never {@code null}. */
@@ -51,9 +60,17 @@ public abstract class GraphElement implements Serializable {
      */
     protected final Map<String, Object> properties;
 
+    /** Whether this element should be upserted or deleted. */
+    protected final ChangeOp op;
+
     protected GraphElement(String label, Map<String, Object> properties) {
+        this(label, properties, ChangeOp.UPSERT);
+    }
+
+    protected GraphElement(String label, Map<String, Object> properties, ChangeOp op) {
         this.label = label;
         this.properties = properties == null ? Collections.emptyMap() : properties;
+        this.op = op == null ? ChangeOp.UPSERT : op;
     }
 
     /** @return whether this element is a vertex or an edge. */
@@ -67,5 +84,10 @@ public abstract class GraphElement implements Serializable {
     /** @return the (immutable view of) element properties. */
     public Map<String, Object> properties() {
         return properties;
+    }
+
+    /** @return whether this element should be upserted (default) or deleted. */
+    public ChangeOp op() {
+        return op;
     }
 }

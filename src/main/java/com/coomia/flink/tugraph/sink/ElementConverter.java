@@ -25,12 +25,12 @@ import java.io.Serializable;
  * Converts an input record into a {@link GraphElement} so the sink writer can buffer a single
  * element type regardless of the upstream API.
  *
- * <p>The DataStream path uses an identity converter (the records are already {@code GraphElement}s);
- * the Table/SQL path uses {@code RowDataToElementConverter}.
+ * <p>The DataStream path uses {@link #identity()} (records are already {@code GraphElement}s, and
+ * their {@link GraphElement#op()} decides upsert vs. delete); the Table/SQL path uses
+ * {@code RowDataToElementConverter} (which decides delete from the Flink {@code RowKind}).
  *
  * @param <InputT> upstream record type
  */
-@FunctionalInterface
 public interface ElementConverter<InputT> extends Serializable {
 
     /**
@@ -48,8 +48,27 @@ public interface ElementConverter<InputT> extends Serializable {
         return false;
     }
 
-    /** @return the identity converter for streams that already emit {@link GraphElement}s. */
+    /**
+     * @return the identity converter for streams that already emit {@link GraphElement}s; a record's
+     *         {@link GraphElement#op()} selects upsert or delete (see {@code Vertex.asDelete()}).
+     */
     static <T extends GraphElement> ElementConverter<T> identity() {
-        return record -> record;
+        return new IdentityElementConverter<>();
+    }
+
+    /** Identity converter that derives the delete flag from {@link GraphElement#op()}. */
+    final class IdentityElementConverter<T extends GraphElement> implements ElementConverter<T> {
+
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public GraphElement convert(T record) {
+            return record;
+        }
+
+        @Override
+        public boolean isDelete(T record) {
+            return record.op() == GraphElement.ChangeOp.DELETE;
+        }
     }
 }

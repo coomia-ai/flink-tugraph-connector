@@ -144,6 +144,13 @@ Edges are written the same way with `TuGraphSink.<Edge>builder()`. See
 [`VertexSinkExample`](src/main/java/com/coomia/flink/tugraph/examples/VertexSinkExample.java) and
 [`EdgeSinkExample`](src/main/java/com/coomia/flink/tugraph/examples/EdgeSinkExample.java).
 
+To **delete** instead of upsert, emit `vertex.asDelete()` / `edge.asDelete()` — the sink issues a
+`DELETE` for those records (the DataStream mirror of the SQL changelog DELETE):
+
+```java
+stream.add(new Vertex("Company", "company_id", "c1", props).asDelete()); // removes :Company c1
+```
+
 ## Flink SQL
 
 ```sql
@@ -414,6 +421,13 @@ vertices.sinkTo(TuGraphSink.<Vertex>builder()
 边用 `TuGraphSink.<Edge>builder()`，示例见
 [`VertexSinkExample`](src/main/java/com/coomia/flink/tugraph/examples/VertexSinkExample.java) 与
 [`EdgeSinkExample`](src/main/java/com/coomia/flink/tugraph/examples/EdgeSinkExample.java)。
+
+要**删除**而非 upsert，发送 `vertex.asDelete()` / `edge.asDelete()` 即可（DataStream 侧对应 SQL
+changelog 的 DELETE）：
+
+```java
+stream.add(new Vertex("Company", "company_id", "c1", props).asDelete()); // 删除 :Company c1
+```
 
 ### Flink SQL 用法
 
