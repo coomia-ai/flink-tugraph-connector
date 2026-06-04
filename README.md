@@ -1,6 +1,6 @@
 # flink-tugraph-connector
 
-[![Build](https://github.com/spancer/flink-tugraph-connector/actions/workflows/ci.yml/badge.svg)](https://github.com/spancer/flink-tugraph-connector/actions/workflows/ci.yml)
+[![Build](https://github.com/coomia-ai/flink-tugraph-connector/actions/workflows/ci.yml/badge.svg)](https://github.com/coomia-ai/flink-tugraph-connector/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Flink](https://img.shields.io/badge/Flink-1.20.x-E6526F.svg)](https://flink.apache.org/)
 [![TuGraph](https://img.shields.io/badge/TuGraph--DB-4.x%20(Bolt)-00A0E9.svg)](https://github.com/TuGraph-family/tugraph-db)

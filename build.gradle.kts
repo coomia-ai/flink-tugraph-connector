@@ -108,7 +108,7 @@ publishing {
             pom {
                 name.set("Flink TuGraph Connector")
                 description.set(project.description)
-                url.set("https://github.com/spancer/flink-tugraph-connector")
+                url.set("https://github.com/coomia-ai/flink-tugraph-connector")
                 licenses {
                     license {
                         name.set("The Apache License, Version 2.0")
@@ -122,9 +122,9 @@ publishing {
                     }
                 }
                 scm {
-                    connection.set("scm:git:https://github.com/spancer/flink-tugraph-connector.git")
-                    developerConnection.set("scm:git:ssh://github.com/spancer/flink-tugraph-connector.git")
-                    url.set("https://github.com/spancer/flink-tugraph-connector")
+                    connection.set("scm:git:https://github.com/coomia-ai/flink-tugraph-connector.git")
+                    developerConnection.set("scm:git:ssh://github.com/coomia-ai/flink-tugraph-connector.git")
+                    url.set("https://github.com/coomia-ai/flink-tugraph-connector")
                 }
             }
         }

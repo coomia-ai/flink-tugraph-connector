@@ -27,5 +27,5 @@ All notable changes to this project are documented here. The format is based on
   integration tests (gated on `TUGRAPH_IT=1`).
 - Runnable examples for DataStream and Flink SQL.
 
-[Unreleased]: https://github.com/spancer/flink-tugraph-connector/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/spancer/flink-tugraph-connector/releases/tag/v0.1.0
+[Unreleased]: https://github.com/coomia-ai/flink-tugraph-connector/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/coomia-ai/flink-tugraph-connector/releases/tag/v0.1.0
