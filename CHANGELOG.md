@@ -18,7 +18,11 @@ All notable changes to this project are documented here. The format is based on
 - **Batching** by size, time and checkpoint barrier, with synchronous flush back-pressure.
 - **Fault tolerance**: exponential-backoff retry of transient Bolt failures via `TuGraphConnection`.
 - **Pluggable Cypher generation** behind `CypherStatementBuilder` with a default
-  `MergeCypherStatementBuilder` (parameterized `UNWIND ... MERGE ... SET x += $map`).
+  `MergeCypherStatementBuilder` tuned for TuGraph's openCypher subset: plain (non-back-quoted)
+  identifiers, one idempotent parameterized `MERGE` per element, per-property `SET`, and auto-commit
+  writes (TuGraph has no explicit transactions). Verified end-to-end against TuGraph-DB 4.x.
+- **Schema prerequisite** documented — TuGraph is not schema-less, so vertex/edge labels must be
+  created before the job runs.
 - **Type mapping** for scalar Flink types and a `null`-skipping policy (`RowDataToElementConverter`).
 - **Missing-endpoint policy** for edges (`skip` / `fail`) with a `tugraph.edgeSkipped` metric.
 - **Metrics**: `numRecordsSend`, `tugraph.flushCount`, `tugraph.flushLatencyMs`, `tugraph.edgeSkipped`.

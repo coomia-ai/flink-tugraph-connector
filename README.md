@@ -93,6 +93,34 @@ dependencies {
 }
 ```
 
+## Prepare the TuGraph schema
+
+TuGraph is **not schema-less** — the vertex and edge labels (with their primary key and properties)
+must exist before the job runs. Create them once with TuGraph's DDL (e.g. over Bolt or in the
+console):
+
+```cypher
+CALL db.createVertexLabel('Company', 'company_id',
+  'company_id', 'STRING', false,
+  'name', 'STRING', true,
+  'reg_capital', 'DOUBLE', true);
+
+CALL db.createEdgeLabel('INVEST', '[["Company","Company"]]',
+  'ratio', 'DOUBLE', true);
+```
+
+The connector targets TuGraph's openCypher subset, so a few rules apply to the data you send:
+
+- **Plain identifiers only** — labels and property names must match `[A-Za-z_][A-Za-z0-9_]*`
+  (TuGraph does not support back-quoted identifiers); the connector validates this and fails fast.
+- **Each element is one idempotent, parameterized `MERGE`** — TuGraph mis-binds per-row values in
+  `UNWIND`-batched writes and rejects `SET n += $map`, so the connector writes one statement per
+  vertex/edge. They share a Bolt session per flush; writes are **auto-commit** (TuGraph has no
+  explicit transactions) and replay-safe.
+- **Primary key is set by `MERGE`**, never re-assigned, so it is never overwritten.
+
+> Verified end-to-end against TuGraph-DB 4.x over Bolt (DataStream job + idempotent replay).
+
 ## DataStream API
 
 ```java
@@ -202,6 +230,9 @@ CREATE TABLE invest_edge (
 - **Idempotency:** all writes use `MERGE` (vertices by primary key, edges by endpoints + label).
   Replaying after a restart updates existing elements instead of duplicating them — **effectively
   exactly-once** for the resulting graph.
+- **Atomicity:** TuGraph has no explicit transactions, so each `MERGE` auto-commits independently
+  (no all-or-nothing across a flush). A failure mid-flush leaves earlier writes applied; the next
+  checkpoint replay re-applies them idempotently.
 - **Property semantics:** properties are **fully overwritten** (`SET = latest value`); accumulative
   ("counter") semantics are not supported — pre-aggregate upstream if you need them.
 
@@ -318,6 +349,32 @@ docker compose up -d    # Bolt 端口 bolt://127.0.0.1:7687（admin / 73@TuGraph
 
 产物 `build/libs/flink-tugraph-connector-<version>.jar` 已内置 relocate 后的 Bolt 驱动，可放入 Flink
 `lib/` 目录，或作为作业 uber-jar 的依赖。Flink 依赖为 `compileOnly`（provided），由集群在运行时提供。
+
+### 准备 TuGraph Schema
+
+TuGraph **不是 schema-less** —— 点 / 边的 label（含主键与属性）必须在作业运行前已存在。用 TuGraph 的
+DDL 预先创建一次（可通过 Bolt 或控制台）：
+
+```cypher
+CALL db.createVertexLabel('Company', 'company_id',
+  'company_id', 'STRING', false,
+  'name', 'STRING', true,
+  'reg_capital', 'DOUBLE', true);
+
+CALL db.createEdgeLabel('INVEST', '[["Company","Company"]]',
+  'ratio', 'DOUBLE', true);
+```
+
+连接器面向 TuGraph 的 openCypher 子集，对写入数据有几条约束：
+
+- **仅支持纯标识符**：label 与属性名需匹配 `[A-Za-z_][A-Za-z0-9_]*`（TuGraph 不支持反引号标识符），
+  连接器会校验并快速失败。
+- **每个元素一条幂等参数化 `MERGE`**：TuGraph 在 `UNWIND` 批量写时会错误绑定逐行取值、且不支持
+  `SET n += $map`，因此连接器对每个点 / 边生成一条语句；同一次 flush 复用一个 Bolt 会话，写入为
+  **自动提交**（TuGraph 无显式事务），重放安全。
+- **主键由 `MERGE` 设定**、不会被再次赋值，因此不会被覆盖。
+
+> 已在 TuGraph-DB 4.x（Bolt）上端到端实测通过（DataStream 作业 + 幂等重放）。
 
 ### DataStream 用法
 

@@ -50,13 +50,19 @@ For the SQL client, also `ADD JAR '/path/to/flink-tugraph-connector-<version>.ja
 | 0.1.x | 1.20.x | 4.x (Bolt 7687) | neo4j-java-driver 4.4.x | 21 |
 
 > The Bolt driver line is pinned to 4.4.x because it is the version officially verified against
-> TuGraph-DB 4.x. The `CypherStatementBuilder` interface lets you swap the generated dialect if a
-> specific TuGraph build does not support `UNWIND` / `SET x += $map`.
+> TuGraph-DB 4.x. The default `MergeCypherStatementBuilder` is tuned for TuGraph's openCypher subset
+> (plain identifiers, one idempotent parameterized `MERGE` per element, per-property `SET`,
+> auto-commit); the `CypherStatementBuilder` interface lets you swap it for another dialect if needed.
+>
+> **Schema is not created by the connector.** TuGraph is not schema-less — create the target vertex
+> and edge labels (with their primary key and properties) before running the job (see the README).
 
 ## Performance benchmark
 
-A single sink subtask is expected to sustain **≥ 5k rows/s** writing vertices (batch size 500),
-network and TuGraph write contention permitting (NFR-1).
+Because TuGraph rejects `UNWIND`-batched and multi-statement writes, the connector issues **one
+auto-commit `MERGE` per element** (sharing a Bolt session per flush). Throughput is therefore bound
+by per-statement round-trips: scale it with **sink parallelism** and a low-latency network to
+TuGraph rather than with a single large batch.
 
 To reproduce on your own hardware:
 
