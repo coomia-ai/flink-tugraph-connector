@@ -143,9 +143,9 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
         long written = 0L;
         for (List<Vertex> group : vertexGroups.values()) {
             Vertex sample = group.get(0);
-            CypherStatement stmt = cypherBuilder.buildVertexUpsert(
+            List<CypherStatement> statements = cypherBuilder.buildVertexUpsert(
                     sample.label(), sample.primaryKey(), group);
-            connection.writeBatch(stmt);
+            connection.writeBatch(statements);
             written += group.size();
         }
         for (List<Edge> group : edgeGroups.values()) {
@@ -165,10 +165,10 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
     /** Write one edge group and apply the missing-endpoint policy. @return edges actually written. */
     private long flushEdgeGroup(List<Edge> group) throws IOException {
         Edge sample = group.get(0);
-        CypherStatement stmt = cypherBuilder.buildEdgeUpsert(
+        List<CypherStatement> statements = cypherBuilder.buildEdgeUpsert(
                 sample.label(), sample.srcLabel(), sample.srcKey(),
                 sample.dstLabel(), sample.dstKey(), group);
-        long writtenCount = connection.writeBatch(stmt);
+        long writtenCount = connection.writeBatch(statements);
         if (writtenCount == TuGraphConnection.NO_WRITTEN_COUNT) {
             // The statement did not report a count; assume all were written.
             return group.size();

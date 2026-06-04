@@ -28,7 +28,6 @@ import org.neo4j.driver.Record;
 import org.neo4j.driver.Result;
 import org.neo4j.driver.Session;
 import org.neo4j.driver.SessionConfig;
-import org.neo4j.driver.Transaction;
 import org.neo4j.driver.exceptions.ServiceUnavailableException;
 import org.neo4j.driver.exceptions.SessionExpiredException;
 import org.neo4j.driver.exceptions.TransientException;
@@ -36,6 +35,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -46,13 +46,11 @@ import java.util.concurrent.TimeUnit;
  * create exactly one per sink subtask in {@code SinkWriter} construction and {@link #close()} it on
  * teardown — never per batch.
  *
- * <p>Each {@link #writeBatch(CypherStatement)} runs in its own explicit (unmanaged) transaction so
- * this class fully controls retry behaviour: transient failures are retried with exponential
- * backoff up to {@link TuGraphSinkOptions#maxRetries()}, after which the exception propagates and
- * Flink restarts the job from the last checkpoint (idempotent {@code MERGE} absorbs the replay).
- *
- * <p>This type is reused by the future Source / Lookup paths and therefore exposes a generic
- * read helper as well.
+ * <p>A whole flush group is written by {@link #writeBatch(List)} in one explicit (unmanaged)
+ * transaction, so this class fully controls retry behaviour: transient failures retry the whole
+ * group with exponential backoff up to {@link TuGraphSinkOptions#maxRetries()}, after which the
+ * exception propagates and Flink restarts the job from the last checkpoint (idempotent {@code MERGE}
+ * absorbs the replay).
  */
 public class TuGraphConnection implements AutoCloseable, Serializable {
 
@@ -60,7 +58,7 @@ public class TuGraphConnection implements AutoCloseable, Serializable {
 
     private static final Logger LOG = LoggerFactory.getLogger(TuGraphConnection.class);
 
-    /** Sentinel returned by {@link #writeBatch} when the statement carries no written-count field. */
+    /** Sentinel meaning no statement in the batch reported a written count (e.g. vertex upserts). */
     public static final long NO_WRITTEN_COUNT = -1L;
 
     private final TuGraphSinkOptions options;
@@ -93,24 +91,37 @@ public class TuGraphConnection implements AutoCloseable, Serializable {
         driver.verifyConnectivity();
     }
 
+    /** Convenience for a single statement; see {@link #writeBatch(List)}. */
+    public long writeBatch(CypherStatement statement) {
+        return writeBatch(Collections.singletonList(statement));
+    }
+
     /**
-     * Execute a write batch in a single transaction, retrying transient errors with exponential
-     * backoff.
+     * Execute a group of statements in a single transaction, retrying transient errors with
+     * exponential backoff.
      *
-     * @param stmt the parameterized batch statement
-     * @return for edge upserts, the number of edges actually written (see
-     *         {@link CypherStatementBuilder#WRITTEN_COUNT_FIELD}); {@link #NO_WRITTEN_COUNT} when the
-     *         statement returns no such field (e.g. vertex upserts)
+     * @param statements the parameterized statements (run in order, atomically)
+     * @return the total number of edges written across statements that report it (see
+     *         {@link CypherStatementBuilder#WRITTEN_COUNT_FIELD}); {@link #NO_WRITTEN_COUNT} when no
+     *         statement returns such a field (e.g. vertex upserts)
      */
-    public long writeBatch(CypherStatement stmt) {
+    public long writeBatch(List<CypherStatement> statements) {
+        if (statements == null || statements.isEmpty()) {
+            return NO_WRITTEN_COUNT;
+        }
         ensureOpen();
         int attempt = 0;
         while (true) {
-            try (Session session = driver.session(SessionConfig.forDatabase(options.graph()));
-                    Transaction tx = session.beginTransaction()) {
-                Result result = tx.run(stmt.cypher(), stmt.parameters());
-                long written = readWrittenCount(result);
-                tx.commit();
+            try (Session session = driver.session(SessionConfig.forDatabase(options.graph()))) {
+                long written = NO_WRITTEN_COUNT;
+                for (CypherStatement stmt : statements) {
+                    // TuGraph supports auto-commit only (no explicit/managed transactions over Bolt),
+                    // so each statement commits on its own; idempotent MERGE keeps replays safe.
+                    long w = readWrittenCount(session.run(stmt.cypher(), stmt.parameters()));
+                    if (w != NO_WRITTEN_COUNT) {
+                        written = (written == NO_WRITTEN_COUNT ? 0L : written) + w;
+                    }
+                }
                 return written;
             } catch (TransientException | ServiceUnavailableException | SessionExpiredException ex) {
                 if (attempt >= options.maxRetries()) {

@@ -81,8 +81,21 @@ tasks.test {
         events("passed", "skipped", "failed")
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     }
-    // Surface the integration-test toggle to the JVM running the tests.
+    // Flink on Java 17+ needs these module opens for its serializers / memory access.
+    jvmArgs(
+        "--add-opens=java.base/java.lang=ALL-UNNAMED",
+        "--add-opens=java.base/java.util=ALL-UNNAMED",
+        "--add-opens=java.base/java.util.concurrent=ALL-UNNAMED",
+        "--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED",
+        "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED",
+        "--add-opens=java.base/java.io=ALL-UNNAMED",
+        "--add-opens=java.base/java.net=ALL-UNNAMED",
+        "--add-opens=java.base/java.nio=ALL-UNNAMED",
+        "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+    )
+    // Surface the integration-test toggles to the JVM running the tests.
     System.getenv("TUGRAPH_IT")?.let { environment("TUGRAPH_IT", it) }
+    System.getenv("TUGRAPH_LIVE")?.let { environment("TUGRAPH_LIVE", it) }
 }
 
 tasks.shadowJar {

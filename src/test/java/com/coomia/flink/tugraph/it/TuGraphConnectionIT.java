@@ -57,7 +57,7 @@ class TuGraphConnectionIT {
     void writesAndIdempotentlyReplaysVertex() {
         MergeCypherStatementBuilder builder = new MergeCypherStatementBuilder();
         Vertex p1 = new Vertex("Person", "id", "p1", Map.of("id", "p1", "name", "Alice"));
-        CypherStatement upsert = builder.buildVertexUpsert("Person", "id", List.of(p1));
+        List<CypherStatement> upsert = builder.buildVertexUpsert("Person", "id", List.of(p1));
 
         try (TuGraphConnection conn = new TuGraphConnection(options())) {
             conn.open();

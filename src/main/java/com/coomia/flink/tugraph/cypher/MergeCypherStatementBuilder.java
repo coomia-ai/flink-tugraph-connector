@@ -24,123 +24,152 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 /**
- * Default {@link CypherStatementBuilder} using batched {@code UNWIND ... MERGE ... SET x += $map}.
+ * Default {@link CypherStatementBuilder}, tuned for TuGraph-DB's openCypher subset (verified against
+ * TuGraph 4.x over Bolt). It deliberately avoids the Neo4j idioms TuGraph does not accept:
  *
- * <p>One statement per batch upserts every element idempotently, which is what makes the
- * at-least-once sink safe to replay (a re-sent element MERGEs onto the existing node/edge and only
- * refreshes properties — no duplicates).
+ * <ul>
+ *   <li><b>No back-quoted identifiers</b> — TuGraph treats {@code `Label`} as a literal name, so
+ *       identifiers are emitted plain and validated instead of quoted.</li>
+ *   <li><b>No {@code SET n += $map}</b> — properties are set individually ({@code SET n.k = $p_k}).</li>
+ *   <li><b>No {@code UNWIND}-batched writes</b> — TuGraph mis-binds per-row values in
+ *       {@code UNWIND ... SET n.k = row.k}, so each element is written as a single parameterized
+ *       statement. The statements of one flush group run together (one Bolt session).</li>
+ *   <li><b>Primary key is never in SET</b> — the {@code MERGE} pattern sets it; setting it again
+ *       hits the unique index.</li>
+ * </ul>
  *
  * <h2>Generated templates</h2>
  * <pre>
- * -- vertices --
- * UNWIND $batch AS row
- * MERGE (n:`Company` {`company_id`: row.id})
- * SET n += row.props
+ * -- one statement per vertex --
+ * MERGE (n:Company {company_id: $pk})
+ * SET n.name = $p_name, n.reg_capital = $p_reg_capital
  *
- * -- edges --
- * UNWIND $batch AS row
- * MATCH (a:`Company` {`company_id`: row.src}), (b:`Company` {`company_id`: row.dst})
- * MERGE (a)-[e:`INVEST`]-&gt;(b)
- * SET e += row.props
+ * -- one statement per edge --
+ * MATCH (a:Company {company_id: $_src}), (b:Company {company_id: $_dst})
+ * MERGE (a)-[e:INVEST]-&gt;(b)
+ * SET e.ratio = $p_ratio
  * RETURN count(e) AS written
  * </pre>
  *
- * <p>Each {@code $batch} entry is a {@code Map}: vertices carry {@code {id, props}}; edges carry
- * {@code {src, dst, props}}. {@code null} properties are dropped so they never overwrite existing
- * values. For edges, rows whose endpoints do not both match produce no edge and are counted as
- * skipped via the returned {@code written} total.
- *
- * <p>If a target TuGraph build does not support {@code SET x += $map}, swap in an alternative
- * builder that expands properties individually; the sink and connection layers are unaffected.
+ * <p>{@code null} properties are dropped. Note TuGraph is not schemaless: the target vertex/edge
+ * labels (with their primary key and properties) must already exist before the job runs.
  */
 public class MergeCypherStatementBuilder implements CypherStatementBuilder {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 3L;
 
-    static final String BATCH_PARAM = "batch";
-    static final String ROW_ID = "id";
-    static final String ROW_SRC = "src";
-    static final String ROW_DST = "dst";
-    static final String ROW_PROPS = "props";
+    static final String PK_PARAM = "pk";
+    static final String SRC_PARAM = "_src";
+    static final String DST_PARAM = "_dst";
+    static final String PROP_PREFIX = "p_";
+
+    /** TuGraph identifiers: a letter or underscore followed by letters, digits or underscores. */
+    private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
 
     @Override
-    public CypherStatement buildVertexUpsert(String label, String primaryKey, List<Vertex> batch) {
+    public List<CypherStatement> buildVertexUpsert(String label, String primaryKey, List<Vertex> batch) {
         requireNonEmpty(batch, "vertex batch");
-        String l = sanitizeIdentifier(label, "vertex label");
-        String pk = sanitizeIdentifier(primaryKey, "primary key");
+        String l = identifier(label, "vertex label");
+        String pk = identifier(primaryKey, "primary key");
 
-        String cypher = "UNWIND $" + BATCH_PARAM + " AS row\n"
-                + "MERGE (n:" + l + " {" + pk + ": row." + ROW_ID + "})\n"
-                + "SET n += row." + ROW_PROPS;
-
-        List<Map<String, Object>> rows = new ArrayList<>(batch.size());
+        List<CypherStatement> statements = new ArrayList<>(batch.size());
         for (Vertex v : batch) {
-            Map<String, Object> row = new LinkedHashMap<>(2);
-            row.put(ROW_ID, v.primaryKeyValue());
-            row.put(ROW_PROPS, nonNullProperties(v.properties()));
-            rows.add(row);
+            Map<String, Object> params = new LinkedHashMap<>();
+            params.put(PK_PARAM, v.primaryKeyValue());
+
+            StringBuilder cypher = new StringBuilder()
+                    .append("MERGE (n:").append(l).append(" {").append(pk).append(": $").append(PK_PARAM).append("})");
+            appendSet(cypher, "n", nonPkKeys(v, primaryKey), v.properties(), params);
+
+            statements.add(new CypherStatement(cypher.toString(), params));
         }
-        return new CypherStatement(cypher, singletonBatch(rows));
+        return statements;
     }
 
     @Override
-    public CypherStatement buildEdgeUpsert(String edgeLabel,
-                                           String srcLabel, String srcKey,
-                                           String dstLabel, String dstKey,
-                                           List<Edge> batch) {
+    public List<CypherStatement> buildEdgeUpsert(String edgeLabel,
+                                                 String srcLabel, String srcKey,
+                                                 String dstLabel, String dstKey,
+                                                 List<Edge> batch) {
         requireNonEmpty(batch, "edge batch");
-        String e = sanitizeIdentifier(edgeLabel, "edge label");
-        String sl = sanitizeIdentifier(srcLabel, "edge source label");
-        String sk = sanitizeIdentifier(srcKey, "edge source key");
-        String dl = sanitizeIdentifier(dstLabel, "edge destination label");
-        String dk = sanitizeIdentifier(dstKey, "edge destination key");
+        String e = identifier(edgeLabel, "edge label");
+        String sl = identifier(srcLabel, "edge source label");
+        String sk = identifier(srcKey, "edge source key");
+        String dl = identifier(dstLabel, "edge destination label");
+        String dk = identifier(dstKey, "edge destination key");
 
-        String cypher = "UNWIND $" + BATCH_PARAM + " AS row\n"
-                + "MATCH (a:" + sl + " {" + sk + ": row." + ROW_SRC + "}), "
-                + "(b:" + dl + " {" + dk + ": row." + ROW_DST + "})\n"
-                + "MERGE (a)-[e:" + e + "]->(b)\n"
-                + "SET e += row." + ROW_PROPS + "\n"
-                + "RETURN count(e) AS " + WRITTEN_COUNT_FIELD;
-
-        List<Map<String, Object>> rows = new ArrayList<>(batch.size());
+        List<CypherStatement> statements = new ArrayList<>(batch.size());
         for (Edge edge : batch) {
-            Map<String, Object> row = new LinkedHashMap<>(3);
-            row.put(ROW_SRC, edge.srcValue());
-            row.put(ROW_DST, edge.dstValue());
-            row.put(ROW_PROPS, nonNullProperties(edge.properties()));
-            rows.add(row);
+            Map<String, Object> params = new LinkedHashMap<>();
+            params.put(SRC_PARAM, edge.srcValue());
+            params.put(DST_PARAM, edge.dstValue());
+
+            StringBuilder cypher = new StringBuilder()
+                    .append("MATCH (a:").append(sl).append(" {").append(sk).append(": $").append(SRC_PARAM).append("}), ")
+                    .append("(b:").append(dl).append(" {").append(dk).append(": $").append(DST_PARAM).append("})\n")
+                    .append("MERGE (a)-[e:").append(e).append("]->(b)");
+            appendSet(cypher, "e", nonNullKeys(edge.properties()), edge.properties(), params);
+            cypher.append("\nRETURN count(e) AS ").append(WRITTEN_COUNT_FIELD);
+
+            statements.add(new CypherStatement(cypher.toString(), params));
         }
-        return new CypherStatement(cypher, singletonBatch(rows));
+        return statements;
+    }
+
+    /** Append a {@code SET alias.key = $p_key, ...} clause for the given keys and bind their params. */
+    private void appendSet(StringBuilder cypher, String alias, List<String> keys,
+                           Map<String, Object> properties, Map<String, Object> params) {
+        boolean first = true;
+        for (String key : keys) {
+            String k = identifier(key, alias.equals("e") ? "edge property" : "vertex property");
+            String param = PROP_PREFIX + k;
+            cypher.append(first ? "\nSET " : ", ");
+            cypher.append(alias).append('.').append(k).append(" = $").append(param);
+            params.put(param, properties.get(key));
+            first = false;
+        }
+    }
+
+    /** Sorted property keys excluding the primary key and {@code null} values. */
+    private static List<String> nonPkKeys(Vertex v, String primaryKey) {
+        TreeSet<String> keys = new TreeSet<>();
+        for (Map.Entry<String, Object> en : v.properties().entrySet()) {
+            if (!en.getKey().equals(primaryKey) && en.getValue() != null) {
+                keys.add(en.getKey());
+            }
+        }
+        return new ArrayList<>(keys);
+    }
+
+    /** Sorted property keys excluding {@code null} values. */
+    private static List<String> nonNullKeys(Map<String, Object> properties) {
+        TreeSet<String> keys = new TreeSet<>();
+        for (Map.Entry<String, Object> en : properties.entrySet()) {
+            if (en.getValue() != null) {
+                keys.add(en.getKey());
+            }
+        }
+        return new ArrayList<>(keys);
     }
 
     /**
-     * Wrap an identifier in backticks, escaping any embedded backtick by doubling it. This keeps
-     * arbitrary label / property names safe to splice into the query (they cannot be parameterized).
+     * Validate that an identifier is a plain TuGraph identifier and return it unquoted. TuGraph does
+     * not support back-quoted identifiers, so anything outside {@code [A-Za-z_][A-Za-z0-9_]*} is
+     * rejected rather than silently mis-quoted.
      */
-    protected String sanitizeIdentifier(String identifier, String role) {
+    protected String identifier(String identifier, String role) {
         if (identifier == null || identifier.isEmpty()) {
             throw new IllegalArgumentException(role + " must not be null or empty");
         }
-        return "`" + identifier.replace("`", "``") + "`";
-    }
-
-    /** Copy properties, dropping {@code null} values so they do not overwrite existing data. */
-    private static Map<String, Object> nonNullProperties(Map<String, Object> properties) {
-        Map<String, Object> out = new LinkedHashMap<>(Math.max(4, properties.size()));
-        for (Map.Entry<String, Object> en : properties.entrySet()) {
-            if (en.getValue() != null) {
-                out.put(en.getKey(), en.getValue());
-            }
+        if (!IDENTIFIER.matcher(identifier).matches()) {
+            throw new IllegalArgumentException(role + " '" + identifier
+                    + "' is not a valid TuGraph identifier (expected [A-Za-z_][A-Za-z0-9_]*)");
         }
-        return out;
-    }
-
-    private static Map<String, Object> singletonBatch(List<Map<String, Object>> rows) {
-        Map<String, Object> params = new LinkedHashMap<>(1);
-        params.put(BATCH_PARAM, rows);
-        return params;
+        return identifier;
     }
 
     private static void requireNonEmpty(List<?> batch, String name) {
