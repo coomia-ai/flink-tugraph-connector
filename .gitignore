@@ -3,8 +3,13 @@
 build/
 !gradle/wrapper/gradle-wrapper.jar
 
-# Claude Code local settings
-.claude/settings.local.json
+# Claude Code agent settings
+.claude/
+
+# Internal planning docs (kept locally, not part of the public repo)
+/docs/REQUIREMENTS.md
+/docs/EVALUATION.md
+/docs/TASKS.md
 
 # IDE
 .idea/
