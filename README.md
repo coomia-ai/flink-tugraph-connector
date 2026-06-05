@@ -63,7 +63,8 @@ oriented Bolt-based implementation modelled on the maturity of `nebula-flink-con
 | Apache Flink | **1.20.x** |
 | TuGraph-DB | 4.x (Bolt, default port 7687) |
 | neo4j-java-driver (Bolt) | 4.4.x |
-| Java | 21 |
+| Java (runtime) | **17** or 21 — the jar targets Java 17 bytecode, so it loads on both |
+| Java (build) | 17+ (JDK 21 toolchain by default) |
 | Gradle | 8.10 (wrapper included) |
 
 ---
@@ -85,8 +86,16 @@ docker compose up -d    # Bolt at bolt://127.0.0.1:7687 (admin / 73@TuGraph), co
 ./gradlew shadowJar      # just the redistributable fat jar
 ```
 
-The shaded jar `build/libs/flink-tugraph-connector-<version>.jar` bundles the relocated Bolt driver.
-Drop it into the Flink `lib/` directory, or add it as a dependency of your job's uber-jar.
+`build` produces two shaded jars (both bundle the relocated Bolt driver):
+
+| Jar | Bytecode | Use on |
+|-----|----------|--------|
+| `flink-tugraph-connector-<version>.jar` | Java 17 | **Java 17 and Java 21** Flink clusters |
+| `flink-tugraph-connector-<version>-jdk21.jar` | Java 21 | Java 21 clusters (optional; the Java 17 jar already runs here) |
+
+Drop the jar into the Flink `lib/` directory, or add it as a dependency of your job's uber-jar. Pick
+the **Java 17 jar by default** — its bytecode loads on Java 17 (which Flink 1.20 commonly runs) and
+on Java 21.
 
 > Flink itself is `compileOnly` (provided) — the connector never bundles Flink, only the Bolt driver.
 
@@ -453,7 +462,8 @@ TuGraph-DB 没有官方 Flink 连接器，本项目以 `nebula-flink-connector` 
 | Apache Flink | **1.20.x** |
 | TuGraph-DB | 4.x（Bolt，默认端口 7687） |
 | neo4j-java-driver（Bolt） | 4.4.x |
-| Java | 21 |
+| Java（运行时） | **17** 或 21 —— jar 编为 Java 17 字节码,两者都能加载 |
+| Java（构建） | 17+(默认 JDK 21 toolchain) |
 | Gradle | 8.10（已内置 wrapper） |
 
 ### 本地启动 TuGraph（可选）
