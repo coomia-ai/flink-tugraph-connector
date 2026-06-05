@@ -389,7 +389,9 @@ Runnable examples live under
 - **v0.2** — bounded `ScanTableSource` (vertex ✅ + edge ✅), `LookupTableSource` with `LookupCache`
   ✅, projection ✅ and filter ✅ (vertex) push-down. Nested ARRAY/MAP/ROW are not supported
   (TuGraph stores scalar properties).
-- **v0.3** — unbounded / CDC source (pending TuGraph change-subscription support).
+- **v0.3 (not planned)** — TuGraph has no native change-data-capture (no binlog / subscription), so
+  an unbounded / CDC source over Bolt is not feasible. Capture changes with an external CDC source
+  upstream (e.g. Flink CDC / Debezium) and write them through this sink's changelog support.
 
 ## Contributing
 
@@ -554,7 +556,8 @@ $env:TUGRAPH_IT=1; ./gradlew test   # 集成测试（需 Docker + 可用 TuGraph
 
 - **v0.2**：有界 `ScanTableSource`（点 ✅ + 边 ✅）、带缓存的维表 `LookupTableSource` ✅、projection ✅
   与 filter ✅（点）下推。TuGraph 仅存标量属性，不支持嵌套 ARRAY/MAP/ROW。
-- **v0.3**：无界 / CDC Source（取决于 TuGraph 变更订阅能力）。
+- **v0.3（暂不做）**：TuGraph 无原生变更订阅 / binlog，Bolt 上无法实现无界 / CDC Source；如需 CDC，在
+  上游用外部 CDC 源（Flink CDC / Debezium）捕获变更，再经本 Sink 的 changelog 能力入图。
 
 ### 贡献与许可
 
