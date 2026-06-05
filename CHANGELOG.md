@@ -13,6 +13,8 @@ All notable changes to this project are documented here. The format is based on
   - **Dimension-table lookup** (`LookupTableSource`) — point lookup by join key for streaming
     enrichment, with an optional `LookupCache` (`lookup.cache.max-rows` / `lookup.cache.ttl`).
   - **Projection push-down** (`SupportsProjectionPushDown`) — only the requested columns are read.
+  - **Filter push-down** (`SupportsFilterPushDown`) — `=, <>, >, >=, <, <=, IN` predicates between a
+    column and a literal are translated to a parameterized Cypher `WHERE`; the rest stay in Flink.
   - New read options `scan.fetch-size`, `lookup.cache.max-rows`, `lookup.cache.ttl`,
     `lookup.max-retries`; `TuGraphConnection.read`, `CypherQueryBuilder` and a row-to-`RowData`
     converter. Verified end-to-end (scan + projection + lookup) against live TuGraph-DB 4.x.

@@ -55,6 +55,8 @@ public class TuGraphRowDataLookupFunction extends LookupFunction {
     private final LogicalType[] keyTypes;
     private final String[] returnNames;
     private final LogicalType[] returnTypes;
+    private final String whereClause;
+    private final Map<String, Object> whereParams;
 
     private transient TuGraphConnection connection;
     private transient RowToRowDataConverter rowConverter;
@@ -63,7 +65,8 @@ public class TuGraphRowDataLookupFunction extends LookupFunction {
                                         CypherQueryBuilder queryBuilder,
                                         String label,
                                         String[] keyNames, LogicalType[] keyTypes,
-                                        String[] returnNames, LogicalType[] returnTypes) {
+                                        String[] returnNames, LogicalType[] returnTypes,
+                                        String whereClause, Map<String, Object> whereParams) {
         this.options = options;
         this.queryBuilder = queryBuilder;
         this.label = label;
@@ -71,6 +74,8 @@ public class TuGraphRowDataLookupFunction extends LookupFunction {
         this.keyTypes = keyTypes;
         this.returnNames = returnNames;
         this.returnTypes = returnTypes;
+        this.whereClause = whereClause;
+        this.whereParams = whereParams;
     }
 
     @Override
@@ -88,7 +93,7 @@ public class TuGraphRowDataLookupFunction extends LookupFunction {
             keyValues.add(RowDataConversions.toJava(keyRow, i, keyTypes[i]));
         }
         CypherStatement stmt = queryBuilder.buildVertexLookup(
-                label, Arrays.asList(keyNames), keyValues, Arrays.asList(returnNames));
+                label, Arrays.asList(keyNames), keyValues, Arrays.asList(returnNames), whereClause, whereParams);
 
         List<Map<String, Object>> rows = connection.read(stmt);
         List<RowData> result = new ArrayList<>(rows.size());

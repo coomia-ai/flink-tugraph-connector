@@ -55,6 +55,8 @@ public class TuGraphRowDataInputFormat implements InputFormat<RowData, GenericIn
     private final LogicalType[] fieldTypes;
     private final String orderByColumn;
     private final int fetchSize;
+    private final String whereClause;
+    private final Map<String, Object> whereParams;
     private final TypeInformation<RowData> producedType;
 
     private transient TuGraphConnection connection;
@@ -67,6 +69,7 @@ public class TuGraphRowDataInputFormat implements InputFormat<RowData, GenericIn
     public TuGraphRowDataInputFormat(TuGraphSinkOptions options, CypherQueryBuilder queryBuilder,
                                      String label, String[] fieldNames, LogicalType[] fieldTypes,
                                      String orderByColumn, int fetchSize,
+                                     String whereClause, Map<String, Object> whereParams,
                                      TypeInformation<RowData> producedType) {
         this.options = options;
         this.queryBuilder = queryBuilder;
@@ -75,6 +78,8 @@ public class TuGraphRowDataInputFormat implements InputFormat<RowData, GenericIn
         this.fieldTypes = fieldTypes;
         this.orderByColumn = orderByColumn;
         this.fetchSize = fetchSize;
+        this.whereClause = whereClause;
+        this.whereParams = whereParams;
         this.producedType = producedType;
     }
 
@@ -109,7 +114,7 @@ public class TuGraphRowDataInputFormat implements InputFormat<RowData, GenericIn
 
     private void loadNextPage() {
         CypherStatement stmt = queryBuilder.buildVertexScan(
-                label, java.util.Arrays.asList(fieldNames), orderByColumn, skip, fetchSize);
+                label, java.util.Arrays.asList(fieldNames), orderByColumn, skip, fetchSize, whereClause, whereParams);
         page = connection.read(stmt);
         pageIdx = 0;
         skip += fetchSize;

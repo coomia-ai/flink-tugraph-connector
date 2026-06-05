@@ -30,32 +30,43 @@ import java.util.regex.Pattern;
  *
  * <h2>Generated templates</h2>
  * <pre>
- * -- lookup (point match by key) --
+ * -- lookup (point match by key, optional pushed filter) --
  * MATCH (n:Company {company_id: $_k0})
+ * WHERE n.reg_capital &gt; $f0
  * RETURN n.company_id AS company_id, n.name AS name
  *
- * -- scan (paginated full scan) --
+ * -- scan (paginated, optional pushed filter) --
  * MATCH (n:Company)
+ * WHERE n.reg_capital &gt; $f0
  * RETURN n.company_id AS company_id, n.name AS name
  * ORDER BY n.company_id SKIP 0 LIMIT 1000
  * </pre>
  */
 public class CypherQueryBuilder implements Serializable {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
 
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
 
+    /** Point lookup matching a vertex by key (no pushed filter). */
+    public CypherStatement buildVertexLookup(String label, List<String> keyColumns,
+                                             List<Object> keyValues, List<String> returnColumns) {
+        return buildVertexLookup(label, keyColumns, keyValues, returnColumns, null, Map.of());
+    }
+
     /**
-     * Build a point lookup matching a vertex by one or more key columns.
+     * Point lookup matching a vertex by key, with an optional pushed-down {@code WHERE} clause.
      *
      * @param label         vertex label
      * @param keyColumns    key property names (match keys)
      * @param keyValues     key values (parameterized; same order as {@code keyColumns})
      * @param returnColumns columns to project
+     * @param whereClause   additional WHERE predicate (without the {@code WHERE} keyword); may be null
+     * @param whereParams   parameters bound by {@code whereClause}
      */
     public CypherStatement buildVertexLookup(String label, List<String> keyColumns,
-                                             List<Object> keyValues, List<String> returnColumns) {
+                                             List<Object> keyValues, List<String> returnColumns,
+                                             String whereClause, Map<String, Object> whereParams) {
         String l = identifier(label, "vertex label");
         StringBuilder cypher = new StringBuilder("MATCH (n:").append(l).append(" {");
         Map<String, Object> params = new LinkedHashMap<>();
@@ -68,25 +79,38 @@ public class CypherQueryBuilder implements Serializable {
             cypher.append(k).append(": $").append(param);
             params.put(param, keyValues.get(i));
         }
-        cypher.append("})\nRETURN ").append(returnClause(returnColumns));
+        cypher.append("})");
+        appendWhere(cypher, whereClause, whereParams, params);
+        cypher.append("\nRETURN ").append(returnClause(returnColumns));
         return new CypherStatement(cypher.toString(), params);
     }
 
+    /** Paginated full vertex scan (no pushed filter). */
+    public CypherStatement buildVertexScan(String label, List<String> returnColumns,
+                                           String orderByColumn, long skip, long limit) {
+        return buildVertexScan(label, returnColumns, orderByColumn, skip, limit, null, Map.of());
+    }
+
     /**
-     * Build a paginated full vertex scan. {@code ORDER BY} the (stable) order column makes paging
-     * deterministic.
+     * Paginated full vertex scan with an optional pushed-down {@code WHERE} clause. {@code ORDER BY}
+     * the (stable) order column makes paging deterministic.
      *
      * @param label         vertex label
      * @param returnColumns columns to project
      * @param orderByColumn column to order by (typically the primary key); may be {@code null}
      * @param skip          rows to skip ({@code <= 0} omits SKIP)
      * @param limit         max rows to return ({@code < 0} omits LIMIT)
+     * @param whereClause   pushed-down WHERE predicate (without the {@code WHERE} keyword); may be null
+     * @param whereParams   parameters bound by {@code whereClause}
      */
     public CypherStatement buildVertexScan(String label, List<String> returnColumns,
-                                           String orderByColumn, long skip, long limit) {
+                                           String orderByColumn, long skip, long limit,
+                                           String whereClause, Map<String, Object> whereParams) {
         String l = identifier(label, "vertex label");
-        StringBuilder cypher = new StringBuilder("MATCH (n:").append(l).append(")\nRETURN ")
-                .append(returnClause(returnColumns));
+        Map<String, Object> params = new LinkedHashMap<>();
+        StringBuilder cypher = new StringBuilder("MATCH (n:").append(l).append(")");
+        appendWhere(cypher, whereClause, whereParams, params);
+        cypher.append("\nRETURN ").append(returnClause(returnColumns));
         if (orderByColumn != null) {
             cypher.append("\nORDER BY n.").append(identifier(orderByColumn, "order column"));
         }
@@ -96,7 +120,17 @@ public class CypherQueryBuilder implements Serializable {
         if (limit >= 0) {
             cypher.append("\nLIMIT ").append(limit);
         }
-        return new CypherStatement(cypher.toString(), Map.of());
+        return new CypherStatement(cypher.toString(), params);
+    }
+
+    private static void appendWhere(StringBuilder cypher, String whereClause,
+                                    Map<String, Object> whereParams, Map<String, Object> params) {
+        if (whereClause != null && !whereClause.isEmpty()) {
+            cypher.append("\nWHERE ").append(whereClause);
+            if (whereParams != null) {
+                params.putAll(whereParams);
+            }
+        }
     }
 
     private String returnClause(List<String> columns) {

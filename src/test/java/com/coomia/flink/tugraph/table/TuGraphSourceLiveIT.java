@@ -145,6 +145,27 @@ class TuGraphSourceLiveIT {
     }
 
     @Test
+    void filterPushDownNarrowsScan() throws Exception {
+        TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inStreamingMode());
+        createSourceTable(tEnv);
+
+        List<Row> eq = new ArrayList<>();
+        try (CloseableIterator<Row> it = tEnv.executeSql(
+                "SELECT company_id, name FROM company_src WHERE name = 'Beta'").collect()) {
+            it.forEachRemaining(eq::add);
+        }
+        assertThat(eq).hasSize(1);
+        assertThat(eq.get(0).getField(0)).isEqualTo("p2");
+
+        List<Row> in = new ArrayList<>();
+        try (CloseableIterator<Row> it = tEnv.executeSql(
+                "SELECT company_id FROM company_src WHERE company_id IN ('p1','p3')").collect()) {
+            it.forEachRemaining(in::add);
+        }
+        assertThat(in).hasSize(2);
+    }
+
+    @Test
     void lookupFunctionPointQueriesByKey() throws Exception {
         TuGraphSinkOptions options = TuGraphSinkOptions.builder()
                 .uri(uri()).auth(user(), pass()).graph(GRAPH).build();
@@ -153,7 +174,7 @@ class TuGraphSourceLiveIT {
         TuGraphRowDataLookupFunction fn = new TuGraphRowDataLookupFunction(
                 options, new CypherQueryBuilder(), V,
                 new String[] {"company_id"}, new LogicalType[] {str},
-                new String[] {"company_id", "name"}, new LogicalType[] {str, str});
+                new String[] {"company_id", "name"}, new LogicalType[] {str, str}, null, java.util.Map.of());
         fn.open(null);
         try {
             Collection<RowData> hit = fn.lookup(GenericRowData.of(StringData.fromString("p2")));

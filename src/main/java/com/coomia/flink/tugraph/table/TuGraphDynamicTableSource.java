@@ -25,6 +25,7 @@ import org.apache.flink.table.connector.source.DynamicTableSource;
 import org.apache.flink.table.connector.source.InputFormatProvider;
 import org.apache.flink.table.connector.source.LookupTableSource;
 import org.apache.flink.table.connector.source.ScanTableSource;
+import org.apache.flink.table.connector.source.abilities.SupportsFilterPushDown;
 import org.apache.flink.table.connector.source.abilities.SupportsProjectionPushDown;
 import org.apache.flink.table.connector.source.lookup.LookupFunctionProvider;
 import org.apache.flink.table.connector.source.lookup.PartialCachingLookupProvider;
@@ -32,7 +33,10 @@ import org.apache.flink.table.connector.source.lookup.cache.LookupCache;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.types.DataType;
 import org.apache.flink.table.types.logical.LogicalType;
+import org.apache.flink.table.expressions.ResolvedExpression;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -42,7 +46,7 @@ import java.util.Objects;
  * {@link SupportsProjectionPushDown} so only the needed columns are returned from TuGraph.
  */
 public class TuGraphDynamicTableSource
-        implements ScanTableSource, LookupTableSource, SupportsProjectionPushDown {
+        implements ScanTableSource, LookupTableSource, SupportsProjectionPushDown, SupportsFilterPushDown {
 
     private final TuGraphSinkOptions options;
     private final CypherQueryBuilder queryBuilder;
@@ -58,6 +62,8 @@ public class TuGraphDynamicTableSource
     /** Projection: produced column i maps to {@code allFieldNames[projectedFields[i]]}. */
     private int[] projectedFields;
     private DataType producedDataType;
+    private String whereClause;
+    private Map<String, Object> whereParams = Map.of();
 
     public TuGraphDynamicTableSource(TuGraphSinkOptions options, String label, String primaryKey,
                                      int fetchSize, LookupCache cache,
@@ -87,7 +93,8 @@ public class TuGraphDynamicTableSource
         LogicalType[] types = producedTypes();
         TypeInformation<RowData> producedType = runtimeProviderContext.createTypeInformation(producedDataType);
         return InputFormatProvider.of(new TuGraphRowDataInputFormat(
-                options, queryBuilder, label, names, types, primaryKey, fetchSize, producedType));
+                options, queryBuilder, label, names, types, primaryKey, fetchSize,
+                whereClause, whereParams, producedType));
     }
 
     @Override
@@ -105,7 +112,7 @@ public class TuGraphDynamicTableSource
         }
 
         TuGraphRowDataLookupFunction function = new TuGraphRowDataLookupFunction(
-                options, queryBuilder, label, keyNames, keyTypes, names, types);
+                options, queryBuilder, label, keyNames, keyTypes, names, types, whereClause, whereParams);
         return cache != null
                 ? PartialCachingLookupProvider.of(function, cache)
                 : LookupFunctionProvider.of(function);
@@ -127,11 +134,21 @@ public class TuGraphDynamicTableSource
     }
 
     @Override
+    public Result applyFilters(List<ResolvedExpression> filters) {
+        TuGraphFilterTranslator.Translation translation = TuGraphFilterTranslator.translate(filters);
+        this.whereClause = translation.whereClause;
+        this.whereParams = translation.params;
+        return Result.of(translation.accepted, translation.remaining);
+    }
+
+    @Override
     public DynamicTableSource copy() {
         TuGraphDynamicTableSource copy = new TuGraphDynamicTableSource(
                 options, label, primaryKey, fetchSize, cache, allFieldNames, allFieldTypes, fullDataType);
         copy.projectedFields = this.projectedFields.clone();
         copy.producedDataType = this.producedDataType;
+        copy.whereClause = this.whereClause;
+        copy.whereParams = this.whereParams;
         return copy;
     }
 
