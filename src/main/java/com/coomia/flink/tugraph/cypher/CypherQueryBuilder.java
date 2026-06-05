@@ -133,6 +133,61 @@ public class CypherQueryBuilder implements Serializable {
         }
     }
 
+    /**
+     * Build a paginated edge scan: {@code MATCH (a:Src)-[e:E]->(b:Dst)} projecting the requested
+     * columns. The source/destination key columns map to the endpoint vertices; the rest map to the
+     * edge. Ordered by the source key for stable paging.
+     *
+     * @param edgeLabel     edge label
+     * @param srcLabel      source vertex label
+     * @param srcKey        source vertex property exposed by {@code srcCol}
+     * @param srcCol        table column carrying the source key
+     * @param dstLabel      destination vertex label
+     * @param dstKey        destination vertex property exposed by {@code dstCol}
+     * @param dstCol        table column carrying the destination key
+     * @param returnColumns columns to project
+     * @param skip          rows to skip ({@code <= 0} omits SKIP)
+     * @param limit         max rows ({@code < 0} omits LIMIT)
+     */
+    public CypherStatement buildEdgeScan(String edgeLabel,
+                                         String srcLabel, String srcKey, String srcCol,
+                                         String dstLabel, String dstKey, String dstCol,
+                                         List<String> returnColumns, long skip, long limit) {
+        String e = identifier(edgeLabel, "edge label");
+        String sl = identifier(srcLabel, "edge source label");
+        String sk = identifier(srcKey, "edge source key");
+        String sc = identifier(srcCol, "edge source column");
+        String dl = identifier(dstLabel, "edge destination label");
+        String dk = identifier(dstKey, "edge destination key");
+        String dc = identifier(dstCol, "edge destination column");
+
+        StringBuilder cypher = new StringBuilder("MATCH (a:").append(sl).append(")-[e:").append(e)
+                .append("]->(b:").append(dl).append(")\nRETURN ");
+        for (int i = 0; i < returnColumns.size(); i++) {
+            String col = identifier(returnColumns.get(i), "return column");
+            if (i > 0) {
+                cypher.append(", ");
+            }
+            String expr;
+            if (col.equals(sc)) {
+                expr = "a." + sk;
+            } else if (col.equals(dc)) {
+                expr = "b." + dk;
+            } else {
+                expr = "e." + col;
+            }
+            cypher.append(expr).append(" AS ").append(col);
+        }
+        cypher.append("\nORDER BY a.").append(sk);
+        if (skip > 0) {
+            cypher.append("\nSKIP ").append(skip);
+        }
+        if (limit >= 0) {
+            cypher.append("\nLIMIT ").append(limit);
+        }
+        return new CypherStatement(cypher.toString(), Map.of());
+    }
+
     private String returnClause(List<String> columns) {
         if (columns == null || columns.isEmpty()) {
             throw new IllegalArgumentException("return columns must not be empty");

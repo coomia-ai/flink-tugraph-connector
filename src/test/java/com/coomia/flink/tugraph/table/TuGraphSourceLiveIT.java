@@ -82,6 +82,11 @@ class TuGraphSourceLiveIT {
                 s.run("MERGE (n:" + V + " {company_id:$pk}) SET n.name=$name",
                         Map.of("pk", v[0], "name", v[1])).consume();
             }
+            s.run("CALL db.createEdgeLabel('PROBE_INVEST', '[]', 'ratio', 'DOUBLE', true)").consume();
+            s.run("MATCH (a:" + V + " {company_id:'p1'}),(b:" + V + " {company_id:'p2'}) "
+                    + "MERGE (a)-[e:PROBE_INVEST]->(b) SET e.ratio=0.3").consume();
+            s.run("MATCH (a:" + V + " {company_id:'p2'}),(b:" + V + " {company_id:'p3'}) "
+                    + "MERGE (a)-[e:PROBE_INVEST]->(b) SET e.ratio=0.5").consume();
         }
     }
 
@@ -95,6 +100,41 @@ class TuGraphSourceLiveIT {
             }
             driver.close();
         }
+    }
+
+    @Test
+    void edgeScanReadsEdgesWithProjection() throws Exception {
+        TableEnvironment tEnv = TableEnvironment.create(EnvironmentSettings.inStreamingMode());
+        tEnv.executeSql(
+                "CREATE TABLE invest_src (\n"
+                        + "  src_company STRING,\n"
+                        + "  dst_company STRING,\n"
+                        + "  ratio DOUBLE\n"
+                        + ") WITH (\n"
+                        + "  'connector' = 'tugraph',\n"
+                        + "  'uri' = '" + uri() + "',\n"
+                        + "  'username' = '" + user() + "',\n"
+                        + "  'password' = '" + pass() + "',\n"
+                        + "  'graph' = '" + GRAPH + "',\n"
+                        + "  'element.type' = 'edge',\n"
+                        + "  'edge.label' = 'PROBE_INVEST',\n"
+                        + "  'edge.src.label' = 'ProbeCompany', 'edge.src.col' = 'src_company', 'edge.src.key' = 'company_id',\n"
+                        + "  'edge.dst.label' = 'ProbeCompany', 'edge.dst.col' = 'dst_company', 'edge.dst.key' = 'company_id'\n"
+                        + ")");
+
+        List<Row> rows = new ArrayList<>();
+        try (CloseableIterator<Row> it = tEnv.executeSql(
+                "SELECT src_company, dst_company, ratio FROM invest_src").collect()) {
+            it.forEachRemaining(rows::add);
+        }
+        assertThat(rows).hasSize(2);
+
+        List<Row> projected = new ArrayList<>();
+        try (CloseableIterator<Row> it = tEnv.executeSql("SELECT src_company FROM invest_src").collect()) {
+            it.forEachRemaining(projected::add);
+        }
+        assertThat(projected).hasSize(2);
+        assertThat(projected.get(0).getArity()).isEqualTo(1);
     }
 
     private void createSourceTable(TableEnvironment tEnv) {

@@ -15,10 +15,17 @@ All notable changes to this project are documented here. The format is based on
   - **Projection push-down** (`SupportsProjectionPushDown`) — only the requested columns are read.
   - **Filter push-down** (`SupportsFilterPushDown`) — `=, <>, >, >=, <, <=, IN` predicates between a
     column and a literal are translated to a parameterized Cypher `WHERE`; the rest stay in Flink.
+  - **Edge scan** (`element.type = edge`) — bounded scan of edges
+    (`MATCH (a:Src)-[e:E]->(b:Dst)`) with projection push-down; key columns map to the endpoint
+    vertices.
   - New read options `scan.fetch-size`, `lookup.cache.max-rows`, `lookup.cache.ttl`,
     `lookup.max-retries`; `TuGraphConnection.read`, `CypherQueryBuilder` and a row-to-`RowData`
-    converter. Verified end-to-end (scan + projection + lookup) against live TuGraph-DB 4.x.
-  - v0.2 reads vertices only; edge source, filter push-down and nested types are planned.
+    converter. Verified end-to-end (vertex + edge scan, projection, filter, lookup) against live
+    TuGraph-DB 4.x.
+
+### Notes
+- Nested ARRAY/MAP/ROW types are **not supported**: TuGraph stores scalar properties only
+  (`Unknown type name` for list/array). Serialize to a STRING column upstream if needed.
 
 ## [0.1.0] - 2026-06-04
 

@@ -36,6 +36,13 @@ import java.util.List;
 import java.util.Set;
 
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.CONNECTION_TIMEOUT;
+import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_DST_COL;
+import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_DST_KEY;
+import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_DST_LABEL;
+import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_LABEL;
+import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_SRC_COL;
+import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_SRC_KEY;
+import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_SRC_LABEL;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.ELEMENT_TYPE;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.GRAPH;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.LOOKUP_CACHE_MAX_ROWS;
@@ -50,11 +57,10 @@ import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.VERTEX_LABE
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.VERTEX_PRIMARY_KEY;
 
 /**
- * Factory for the {@code 'connector' = 'tugraph'} Table/SQL <em>source</em> (bounded vertex scan and
- * dimension-table lookup), discovered via Java SPI. Shares the {@code tugraph} identifier with the
- * sink factory; Flink selects this one when a source is requested.
- *
- * <p>v0.2 reads vertices only ({@code element.type = vertex}).
+ * Factory for the {@code 'connector' = 'tugraph'} Table/SQL <em>source</em>, discovered via Java
+ * SPI. Shares the {@code tugraph} identifier with the sink factory; Flink selects this one when a
+ * source is requested. Supports a bounded vertex scan + dimension-table lookup
+ * ({@code element.type = vertex}) and a bounded edge scan ({@code element.type = edge}).
  */
 public class TuGraphDynamicTableSourceFactory implements DynamicTableSourceFactory {
 
@@ -83,6 +89,13 @@ public class TuGraphDynamicTableSourceFactory implements DynamicTableSourceFacto
         options.add(ELEMENT_TYPE);
         options.add(VERTEX_LABEL);
         options.add(VERTEX_PRIMARY_KEY);
+        options.add(EDGE_LABEL);
+        options.add(EDGE_SRC_LABEL);
+        options.add(EDGE_SRC_COL);
+        options.add(EDGE_SRC_KEY);
+        options.add(EDGE_DST_LABEL);
+        options.add(EDGE_DST_COL);
+        options.add(EDGE_DST_KEY);
         options.add(SCAN_FETCH_SIZE);
         options.add(LOOKUP_CACHE_MAX_ROWS);
         options.add(LOOKUP_CACHE_TTL);
@@ -97,13 +110,6 @@ public class TuGraphDynamicTableSourceFactory implements DynamicTableSourceFacto
         ReadableConfig config = helper.getOptions();
 
         ElementType elementType = config.getOptional(ELEMENT_TYPE).orElse(ElementType.VERTEX);
-        if (elementType != ElementType.VERTEX) {
-            throw new ValidationException("The TuGraph source supports only '"
-                    + ELEMENT_TYPE.key() + "' = vertex in this release.");
-        }
-
-        String label = config.getOptional(VERTEX_LABEL).orElseThrow(() -> new ValidationException(
-                "Option '" + VERTEX_LABEL.key() + "' is required for a TuGraph source."));
 
         ResolvedSchema schema = context.getCatalogTable().getResolvedSchema();
         List<String> names = schema.getColumnNames();
@@ -113,10 +119,6 @@ public class TuGraphDynamicTableSourceFactory implements DynamicTableSourceFacto
                 .toArray(LogicalType[]::new);
         DataType fullDataType = schema.toPhysicalRowDataType();
 
-        // Order/scan key: explicit option, else the table's primary key, else none (unordered paging).
-        String primaryKey = config.getOptional(VERTEX_PRIMARY_KEY).orElseGet(() ->
-                schema.getPrimaryKey().map(pk -> pk.getColumns().get(0)).orElse(null));
-
         TuGraphSinkOptions connectionOptions = TuGraphSinkOptions.builder()
                 .uri(config.get(URI))
                 .auth(config.get(USERNAME), config.get(PASSWORD))
@@ -125,6 +127,24 @@ public class TuGraphDynamicTableSourceFactory implements DynamicTableSourceFacto
                 .connectionTimeoutMs(config.get(CONNECTION_TIMEOUT).toMillis())
                 .maxConnectionPoolSize(config.get(MAX_CONNECTION_POOL_SIZE))
                 .build();
+
+        if (elementType == ElementType.EDGE) {
+            String edgeLabel = require(config, EDGE_LABEL);
+            String srcLabel = require(config, EDGE_SRC_LABEL);
+            String srcCol = require(config, EDGE_SRC_COL);
+            String srcKey = config.getOptional(EDGE_SRC_KEY).orElse(srcCol);
+            String dstLabel = require(config, EDGE_DST_LABEL);
+            String dstCol = require(config, EDGE_DST_COL);
+            String dstKey = config.getOptional(EDGE_DST_KEY).orElse(dstCol);
+            return new TuGraphEdgeDynamicTableSource(connectionOptions, edgeLabel,
+                    srcLabel, srcKey, srcCol, dstLabel, dstKey, dstCol,
+                    config.get(SCAN_FETCH_SIZE), fieldNames, fieldTypes, fullDataType);
+        }
+
+        String label = config.getOptional(VERTEX_LABEL).orElseThrow(() -> new ValidationException(
+                "Option '" + VERTEX_LABEL.key() + "' is required for a TuGraph vertex source."));
+        String primaryKey = config.getOptional(VERTEX_PRIMARY_KEY).orElseGet(() ->
+                schema.getPrimaryKey().map(pk -> pk.getColumns().get(0)).orElse(null));
 
         LookupCache cache = null;
         long maxRows = config.get(LOOKUP_CACHE_MAX_ROWS);
@@ -136,5 +156,10 @@ public class TuGraphDynamicTableSourceFactory implements DynamicTableSourceFacto
 
         return new TuGraphDynamicTableSource(connectionOptions, label, primaryKey,
                 config.get(SCAN_FETCH_SIZE), cache, fieldNames, fieldTypes, fullDataType);
+    }
+
+    private static String require(ReadableConfig config, ConfigOption<String> option) {
+        return config.getOptional(option).orElseThrow(() -> new ValidationException(
+                "Option '" + option.key() + "' is required for a TuGraph edge source."));
     }
 }
