@@ -42,7 +42,7 @@ import com.coomia.flink.tugraph.element.GraphElement;
 public class TuGraphSinkBuilder<T extends GraphElement> {
 
     private final TuGraphSinkOptions.Builder options = TuGraphSinkOptions.builder();
-    private CypherStatementBuilder cypherBuilder = new MergeCypherStatementBuilder();
+    private CypherStatementBuilder cypherBuilder; // null -> derived from options at build()
 
     TuGraphSinkBuilder() {
     }
@@ -102,6 +102,12 @@ public class TuGraphSinkBuilder<T extends GraphElement> {
         return this;
     }
 
+    /** Edge property columns folded into the edge MERGE match key (e.g. {@code rel_type}). */
+    public TuGraphSinkBuilder<T> edgeMergeKeys(java.util.List<String> edgeMergeKeys) {
+        options.edgeMergeKeys(edgeMergeKeys);
+        return this;
+    }
+
     /** Override the Cypher generation strategy (defaults to {@link MergeCypherStatementBuilder}). */
     public TuGraphSinkBuilder<T> cypherStatementBuilder(CypherStatementBuilder cypherBuilder) {
         this.cypherBuilder = cypherBuilder;
@@ -109,6 +115,11 @@ public class TuGraphSinkBuilder<T extends GraphElement> {
     }
 
     public TuGraphSink<T> build() {
-        return new TuGraphSink<>(options.build(), ElementConverter.identity(), cypherBuilder);
+        TuGraphSinkOptions opts = options.build();
+        CypherStatementBuilder builder = cypherBuilder != null
+                ? cypherBuilder
+                : new MergeCypherStatementBuilder(opts.edgeMergeKeys(),
+                        opts.onMissingEndpoint() == TuGraphSinkOptions.OnMissingEndpoint.CREATE);
+        return new TuGraphSink<>(opts, ElementConverter.identity(), builder);
     }
 }

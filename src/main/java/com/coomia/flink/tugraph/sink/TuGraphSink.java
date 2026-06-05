@@ -57,7 +57,8 @@ public class TuGraphSink<InputT> implements Sink<InputT> {
 
     /** Convenience constructor using the default {@link MergeCypherStatementBuilder}. */
     public TuGraphSink(TuGraphSinkOptions options, ElementConverter<InputT> converter) {
-        this(options, converter, new MergeCypherStatementBuilder());
+        this(options, converter, new MergeCypherStatementBuilder(options.edgeMergeKeys(),
+                options.onMissingEndpoint() == TuGraphSinkOptions.OnMissingEndpoint.CREATE));
     }
 
     /** Modern entry point invoked by Flink 1.20 at runtime. */

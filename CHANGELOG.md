@@ -6,7 +6,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **Edge MERGE could silently drop relations (data loss).** With a single edge label discriminated
+  by a property (e.g. one `REL` label + `rel_type`), two relation types between the same vertex pair
+  collapsed into one edge (last-write-wins). New **`edge.merge.keys`** option folds property columns
+  into the MERGE match (`MERGE (a)-[e:REL {rel_type: …}]->(b)`) so they stay distinct; also narrows
+  edge deletes to the specific edge. Verified live (placed_by + shipped_to kept as 2 edges, idempotent).
+
 ### Added
+- **`edge.on-missing-endpoint = create`** — MERGE a bare endpoint vertex (key only) when an edge
+  endpoint is missing, instead of `skip` / `fail`, so out-of-order at-least-once pipelines become
+  eventually consistent. Verified live.
 - **Table/SQL source (v0.2)** under the same `'connector' = 'tugraph'`:
   - **Bounded vertex scan** (`ScanTableSource`) — paginated `MATCH … RETURN … ORDER BY pk SKIP/LIMIT`
     via an `InputFormat`.

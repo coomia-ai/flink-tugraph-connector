@@ -112,7 +112,15 @@ public final class TuGraphConnectorOptions {
     public static final ConfigOption<OnMissingEndpoint> EDGE_ON_MISSING_ENDPOINT =
             ConfigOptions.key("edge.on-missing-endpoint")
                     .enumType(OnMissingEndpoint.class).defaultValue(OnMissingEndpoint.SKIP)
-                    .withDescription("Behaviour when an edge endpoint vertex is missing: SKIP or FAIL.");
+                    .withDescription("Behaviour when an edge endpoint vertex is missing: SKIP, FAIL, "
+                            + "or CREATE (MERGE a bare endpoint vertex).");
+
+    public static final ConfigOption<java.util.List<String>> EDGE_MERGE_KEYS =
+            ConfigOptions.key("edge.merge.keys")
+                    .stringType().asList().noDefaultValue()
+                    .withDescription("Edge property columns folded into the edge MERGE match key "
+                            + "(e.g. rel_type), so distinct relation types between the same vertex "
+                            + "pair are kept as separate edges instead of collapsing.");
 
     // ---- Batching / retry ----
     public static final ConfigOption<Integer> SINK_BATCH_SIZE = ConfigOptions.key("sink.batch.size")

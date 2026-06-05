@@ -92,6 +92,7 @@ class TuGraphConnectorLiveIT {
             s.run("CALL db.createVertexLabel('" + V + "', 'company_id', "
                     + "'company_id', 'STRING', false, 'name', 'STRING', true)").consume();
             s.run("CALL db.createEdgeLabel('" + E + "', '[]', 'ratio', 'DOUBLE', true)").consume();
+            s.run("CALL db.createEdgeLabel('PROBE_REL', '[]', 'rel_type', 'STRING', true, 'weight', 'DOUBLE', true)").consume();
         }
     }
 
@@ -247,6 +248,41 @@ class TuGraphConnectorLiveIT {
 
         assertThat(count("MATCH (n:" + V + ") RETURN count(n) AS c")).isEqualTo(1L);
         assertThat(single("MATCH (n:" + V + " {company_id:'p2'}) RETURN n.name AS v")).isEqualTo("Beta");
+    }
+
+    @Test
+    void edgeMergeKeysKeepDistinctRelationTypes() {
+        MergeCypherStatementBuilder vb = new MergeCypherStatementBuilder();
+        MergeCypherStatementBuilder eb = new MergeCypherStatementBuilder(List.of("rel_type"), false);
+        try (TuGraphConnection conn = new TuGraphConnection(options())) {
+            conn.open();
+            conn.writeBatch(vb.buildVertexUpsert(V, "company_id", vertices()));
+            Edge placed = new Edge("PROBE_REL", V, "company_id", "p1", V, "company_id", "p2",
+                    Map.of("rel_type", "placed_by", "weight", 1.0d));
+            Edge shipped = new Edge("PROBE_REL", V, "company_id", "p1", V, "company_id", "p2",
+                    Map.of("rel_type", "shipped_to", "weight", 2.0d));
+            conn.writeBatch(eb.buildEdgeUpsert("PROBE_REL", V, "company_id", V, "company_id", List.of(placed)));
+            conn.writeBatch(eb.buildEdgeUpsert("PROBE_REL", V, "company_id", V, "company_id", List.of(shipped)));
+            // Two relation types between the same pair must NOT collapse into one edge.
+            assertThat(count("MATCH ()-[e:PROBE_REL]->() RETURN count(e) AS c")).isEqualTo(2L);
+            // Idempotent replay of one keeps the total at 2.
+            conn.writeBatch(eb.buildEdgeUpsert("PROBE_REL", V, "company_id", V, "company_id", List.of(placed)));
+            assertThat(count("MATCH ()-[e:PROBE_REL]->() RETURN count(e) AS c")).isEqualTo(2L);
+        }
+    }
+
+    @Test
+    void onMissingEndpointCreateMergesEndpoints() {
+        MergeCypherStatementBuilder create = new MergeCypherStatementBuilder(List.of(), true);
+        try (TuGraphConnection conn = new TuGraphConnection(options())) {
+            conn.open();
+            // z1 / z2 do not exist; CREATE mode should MERGE them and write the edge.
+            Edge edge = new Edge(E, V, "company_id", "z1", V, "company_id", "z2", Map.of("ratio", 0.5d));
+            long written = conn.writeBatch(create.buildEdgeUpsert(E, V, "company_id", V, "company_id", List.of(edge)));
+            assertThat(written).isEqualTo(1L);
+            assertThat(count("MATCH (n:" + V + ") WHERE n.company_id IN ['z1','z2'] RETURN count(n) AS c")).isEqualTo(2L);
+            assertThat(count("MATCH ()-[e:" + E + "]->() RETURN count(e) AS c")).isEqualTo(1L);
+        }
     }
 
     private static long count(String cypher) {

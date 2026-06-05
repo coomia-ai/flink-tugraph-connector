@@ -38,6 +38,7 @@ import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_DST_CO
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_DST_KEY;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_DST_LABEL;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_LABEL;
+import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_MERGE_KEYS;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_ON_MISSING_ENDPOINT;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_SRC_COL;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.EDGE_SRC_KEY;
@@ -93,6 +94,7 @@ public class TuGraphDynamicTableSinkFactory implements DynamicTableSinkFactory {
         options.add(EDGE_DST_COL);
         options.add(EDGE_DST_KEY);
         options.add(EDGE_ON_MISSING_ENDPOINT);
+        options.add(EDGE_MERGE_KEYS);
         options.add(SINK_BATCH_SIZE);
         options.add(SINK_BATCH_INTERVAL);
         options.add(SINK_MAX_RETRIES);
@@ -115,6 +117,7 @@ public class TuGraphDynamicTableSinkFactory implements DynamicTableSinkFactory {
                 .connectionTimeoutMs(config.get(CONNECTION_TIMEOUT).toMillis())
                 .maxConnectionPoolSize(config.get(MAX_CONNECTION_POOL_SIZE))
                 .onMissingEndpoint(config.get(EDGE_ON_MISSING_ENDPOINT))
+                .edgeMergeKeys(config.getOptional(EDGE_MERGE_KEYS).orElse(java.util.Collections.emptyList()))
                 .build();
 
         ResolvedSchema schema = context.getCatalogTable().getResolvedSchema();

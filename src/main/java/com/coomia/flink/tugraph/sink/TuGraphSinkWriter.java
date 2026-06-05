@@ -183,9 +183,9 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
 
         // Safe to parallelize only when the flush is a single upsert kind with no ordering / endpoint
         // dependencies: vertices-only or edges-only, and no deletes.
-        boolean parallel = deletes == 0
-                && (vertexUpserts == 0 || edgeUpserts == 0)
-                && statements.size() > 1;
+        // Parallelize only pure vertex-upsert flushes - avoids edge / endpoint write races
+        // (e.g. on-missing-endpoint=create MERGEing the same endpoint from two threads).
+        boolean parallel = deletes == 0 && edgeUpserts == 0 && statements.size() > 1;
         long writtenEdges = parallel
                 ? writeConcurrently(statements)
                 : connection.writeBatch(statements);

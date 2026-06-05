@@ -21,6 +21,7 @@ import com.coomia.flink.tugraph.element.Edge;
 import com.coomia.flink.tugraph.element.Vertex;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,43 +33,53 @@ import java.util.regex.Pattern;
  * TuGraph 4.x over Bolt). It deliberately avoids the Neo4j idioms TuGraph does not accept:
  *
  * <ul>
- *   <li><b>No back-quoted identifiers</b> — TuGraph treats {@code `Label`} as a literal name, so
- *       identifiers are emitted plain and validated instead of quoted.</li>
- *   <li><b>No {@code SET n += $map}</b> — properties are set individually ({@code SET n.k = $p_k}).</li>
- *   <li><b>No {@code UNWIND}-batched writes</b> — TuGraph mis-binds per-row values in
- *       {@code UNWIND ... SET n.k = row.k}, so each element is written as a single parameterized
- *       statement. The statements of one flush group run together (one Bolt session).</li>
- *   <li><b>Primary key is never in SET</b> — the {@code MERGE} pattern sets it; setting it again
- *       hits the unique index.</li>
+ *   <li><b>No back-quoted identifiers</b> — identifiers are emitted plain and validated.</li>
+ *   <li><b>No {@code SET n += $map}</b> — properties are set individually.</li>
+ *   <li><b>No {@code UNWIND}-batched writes</b> — each element is one parameterized statement.</li>
+ *   <li><b>Primary key is never in SET</b> — the {@code MERGE} pattern sets it.</li>
  * </ul>
  *
- * <h2>Generated templates</h2>
- * <pre>
- * -- one statement per vertex --
- * MERGE (n:Company {company_id: $pk})
- * SET n.name = $p_name, n.reg_capital = $p_reg_capital
- *
- * -- one statement per edge --
- * MATCH (a:Company {company_id: $_src}), (b:Company {company_id: $_dst})
- * MERGE (a)-[e:INVEST]-&gt;(b)
- * SET e.ratio = $p_ratio
- * RETURN count(e) AS written
- * </pre>
- *
- * <p>{@code null} properties are dropped. Note TuGraph is not schemaless: the target vertex/edge
- * labels (with their primary key and properties) must already exist before the job runs.
+ * <h2>Edge options</h2>
+ * <ul>
+ *   <li><b>{@code edgeMergeKeys}</b> — property columns folded into the edge MERGE match (e.g.
+ *       {@code rel_type}). With a single edge label discriminated by a property, this keeps multiple
+ *       relation types between the same vertex pair as distinct edges instead of collapsing them
+ *       (last-write-wins). Verified on TuGraph: {@code MERGE (a)-[e:REL {rel_type:$v}]->(b)} keeps
+ *       them separate and stays idempotent.</li>
+ *   <li><b>{@code mergeEndpoints}</b> — when an endpoint may be missing
+ *       ({@code edge.on-missing-endpoint = create}), the endpoints are {@code MERGE}d (bare vertex,
+ *       key only) instead of {@code MATCH}ed, so an out-of-order at-least-once pipeline becomes
+ *       eventually consistent.</li>
+ * </ul>
  */
 public class MergeCypherStatementBuilder implements CypherStatementBuilder {
 
-    private static final long serialVersionUID = 3L;
+    private static final long serialVersionUID = 4L;
 
     static final String PK_PARAM = "pk";
     static final String SRC_PARAM = "_src";
     static final String DST_PARAM = "_dst";
     static final String PROP_PREFIX = "p_";
+    static final String MERGE_KEY_PREFIX = "mk_";
 
     /** TuGraph identifiers: a letter or underscore followed by letters, digits or underscores. */
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
+
+    private final List<String> edgeMergeKeys;
+    private final boolean mergeEndpoints;
+
+    public MergeCypherStatementBuilder() {
+        this(Collections.emptyList(), false);
+    }
+
+    /**
+     * @param edgeMergeKeys edge property columns folded into the edge MERGE match key
+     * @param mergeEndpoints {@code true} to MERGE (create-if-missing) edge endpoints instead of MATCH
+     */
+    public MergeCypherStatementBuilder(List<String> edgeMergeKeys, boolean mergeEndpoints) {
+        this.edgeMergeKeys = edgeMergeKeys == null ? Collections.emptyList() : edgeMergeKeys;
+        this.mergeEndpoints = mergeEndpoints;
+    }
 
     @Override
     public List<CypherStatement> buildVertexUpsert(String label, String primaryKey, List<Vertex> batch) {
@@ -108,11 +119,19 @@ public class MergeCypherStatementBuilder implements CypherStatementBuilder {
             params.put(SRC_PARAM, edge.srcValue());
             params.put(DST_PARAM, edge.dstValue());
 
-            StringBuilder cypher = new StringBuilder()
-                    .append("MATCH (a:").append(sl).append(" {").append(sk).append(": $").append(SRC_PARAM).append("}), ")
-                    .append("(b:").append(dl).append(" {").append(dk).append(": $").append(DST_PARAM).append("})\n")
-                    .append("MERGE (a)-[e:").append(e).append("]->(b)");
-            appendSet(cypher, "e", nonNullKeys(edge.properties()), edge.properties(), params);
+            StringBuilder cypher = new StringBuilder();
+            if (mergeEndpoints) {
+                // Create the endpoints if missing (eventually-consistent, out-of-order pipelines).
+                cypher.append("MERGE (a:").append(sl).append(" {").append(sk).append(": $").append(SRC_PARAM).append("})\n")
+                        .append("MERGE (b:").append(dl).append(" {").append(dk).append(": $").append(DST_PARAM).append("})\n");
+            } else {
+                cypher.append("MATCH (a:").append(sl).append(" {").append(sk).append(": $").append(SRC_PARAM).append("}), ")
+                        .append("(b:").append(dl).append(" {").append(dk).append(": $").append(DST_PARAM).append("})\n");
+            }
+            cypher.append("MERGE (a)-[e:").append(e);
+            appendMergeKeyPattern(cypher, edge, params);
+            cypher.append("]->(b)");
+            appendSet(cypher, "e", edgeSetKeys(edge), edge.properties(), params);
             cypher.append("\nRETURN count(e) AS ").append(WRITTEN_COUNT_FIELD);
 
             statements.add(new CypherStatement(cypher.toString(), params));
@@ -148,18 +167,41 @@ public class MergeCypherStatementBuilder implements CypherStatementBuilder {
         String sk = identifier(srcKey, "edge source key");
         String dl = identifier(dstLabel, "edge destination label");
         String dk = identifier(dstKey, "edge destination key");
-        String cypher = "MATCH (a:" + sl + " {" + sk + ": $" + SRC_PARAM + "})-[e:" + e + "]->"
-                + "(b:" + dl + " {" + dk + ": $" + DST_PARAM + "}) DELETE e";
 
         List<CypherStatement> statements = new ArrayList<>(batch.size());
         for (Edge edge : batch) {
-            Map<String, Object> params = new LinkedHashMap<>(2);
+            Map<String, Object> params = new LinkedHashMap<>();
             params.put(SRC_PARAM, edge.srcValue());
             params.put(DST_PARAM, edge.dstValue());
-            statements.add(new CypherStatement(cypher, params));
+
+            StringBuilder cypher = new StringBuilder()
+                    .append("MATCH (a:").append(sl).append(" {").append(sk).append(": $").append(SRC_PARAM).append("})-[e:").append(e);
+            appendMergeKeyPattern(cypher, edge, params); // narrow deletion to the specific edge
+            cypher.append("]->(b:").append(dl).append(" {").append(dk).append(": $").append(DST_PARAM).append("}) DELETE e");
+
+            statements.add(new CypherStatement(cypher.toString(), params));
         }
         return statements;
     }
+
+    /** Append a {@code {k: $mk_k, ...}} relationship property pattern for the merge keys. */
+    private void appendMergeKeyPattern(StringBuilder cypher, Edge edge, Map<String, Object> params) {
+        if (edgeMergeKeys.isEmpty()) {
+            return;
+        }
+        cypher.append(" {");
+        for (int i = 0; i < edgeMergeKeys.size(); i++) {
+            String k = identifier(edgeMergeKeys.get(i), "edge merge key");
+            String param = MERGE_KEY_PREFIX + k;
+            if (i > 0) {
+                cypher.append(", ");
+            }
+            cypher.append(k).append(": $").append(param);
+            params.put(param, edge.properties().get(k));
+        }
+        cypher.append("}");
+    }
+
     /** Append a {@code SET alias.key = $p_key, ...} clause for the given keys and bind their params. */
     private void appendSet(StringBuilder cypher, String alias, List<String> keys,
                            Map<String, Object> properties, Map<String, Object> params) {
@@ -185,11 +227,11 @@ public class MergeCypherStatementBuilder implements CypherStatementBuilder {
         return new ArrayList<>(keys);
     }
 
-    /** Sorted property keys excluding {@code null} values. */
-    private static List<String> nonNullKeys(Map<String, Object> properties) {
+    /** Sorted edge property keys to SET: non-null and not part of the MERGE match key. */
+    private List<String> edgeSetKeys(Edge edge) {
         TreeSet<String> keys = new TreeSet<>();
-        for (Map.Entry<String, Object> en : properties.entrySet()) {
-            if (en.getValue() != null) {
+        for (Map.Entry<String, Object> en : edge.properties().entrySet()) {
+            if (en.getValue() != null && !edgeMergeKeys.contains(en.getKey())) {
                 keys.add(en.getKey());
             }
         }

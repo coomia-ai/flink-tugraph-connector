@@ -19,6 +19,8 @@ package com.coomia.flink.tugraph;
 
 import java.io.Serializable;
 import java.time.Duration;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -39,7 +41,9 @@ public final class TuGraphSinkOptions implements Serializable {
         /** Silently skip the edge and record a metric (default). */
         SKIP,
         /** Fail the write, triggering a Flink restart. */
-        FAIL
+        FAIL,
+        /** MERGE a bare endpoint vertex (its key only) when it is missing, then write the edge. */
+        CREATE
     }
 
     // ---- Connection ----
@@ -57,6 +61,7 @@ public final class TuGraphSinkOptions implements Serializable {
 
     // ---- Edge behaviour ----
     private final OnMissingEndpoint onMissingEndpoint;
+    private final List<String> edgeMergeKeys;
 
     private TuGraphSinkOptions(Builder b) {
         this.uri = b.uri;
@@ -69,6 +74,7 @@ public final class TuGraphSinkOptions implements Serializable {
         this.batchIntervalMs = b.batchIntervalMs;
         this.maxRetries = b.maxRetries;
         this.onMissingEndpoint = b.onMissingEndpoint;
+        this.edgeMergeKeys = b.edgeMergeKeys;
     }
 
     public String uri() {
@@ -111,6 +117,11 @@ public final class TuGraphSinkOptions implements Serializable {
         return onMissingEndpoint;
     }
 
+    /** Extra edge property columns folded into the edge MERGE match key (e.g. {@code rel_type}). */
+    public List<String> edgeMergeKeys() {
+        return edgeMergeKeys;
+    }
+
     public static Builder builder() {
         return new Builder();
     }
@@ -142,6 +153,7 @@ public final class TuGraphSinkOptions implements Serializable {
         private long batchIntervalMs = 1_000L;
         private int maxRetries = 3;
         private OnMissingEndpoint onMissingEndpoint = OnMissingEndpoint.SKIP;
+        private List<String> edgeMergeKeys = Collections.emptyList();
 
         private Builder() {
         }
@@ -212,6 +224,12 @@ public final class TuGraphSinkOptions implements Serializable {
 
         public Builder onMissingEndpoint(OnMissingEndpoint onMissingEndpoint) {
             this.onMissingEndpoint = onMissingEndpoint;
+            return this;
+        }
+
+        /** Edge property columns to fold into the edge MERGE match key (e.g. {@code rel_type}). */
+        public Builder edgeMergeKeys(List<String> edgeMergeKeys) {
+            this.edgeMergeKeys = edgeMergeKeys == null ? Collections.emptyList() : edgeMergeKeys;
             return this;
         }
 

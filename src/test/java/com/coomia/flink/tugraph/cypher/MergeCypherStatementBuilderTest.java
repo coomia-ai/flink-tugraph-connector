@@ -156,6 +156,45 @@ class MergeCypherStatementBuilderTest {
         assertThat(stmts.get(0).parameters()).containsEntry("_src", "c1").containsEntry("_dst", "c2");
     }
     @Test
+    void edgeUpsert_withMergeKeys_foldsKeyIntoMergePatternNotSet() {
+        MergeCypherStatementBuilder mk = new MergeCypherStatementBuilder(List.of("rel_type"), false);
+        Edge edge = new Edge("REL", "Company", "id", "c1", "Company", "id", "c2",
+                Map.of("rel_type", "placed_by", "weight", 1.0d));
+        List<CypherStatement> stmts = mk.buildEdgeUpsert("REL", "Company", "id", "Company", "id", List.of(edge));
+        assertThat(stmts.get(0).cypher()).isEqualTo(
+                "MATCH (a:Company {id: $_src}), (b:Company {id: $_dst})\n"
+                        + "MERGE (a)-[e:REL {rel_type: $mk_rel_type}]->(b)\n"
+                        + "SET e.weight = $p_weight\n"
+                        + "RETURN count(e) AS written");
+        assertThat(stmts.get(0).parameters())
+                .containsEntry("mk_rel_type", "placed_by")
+                .containsEntry("p_weight", 1.0d)
+                .doesNotContainKey("p_rel_type");
+    }
+
+    @Test
+    void edgeUpsert_createMode_mergesEndpoints() {
+        MergeCypherStatementBuilder create = new MergeCypherStatementBuilder(List.of(), true);
+        Edge edge = new Edge("REL", "Company", "id", "c1", "Company", "id", "c2", Map.of("w", 1.0d));
+        List<CypherStatement> stmts = create.buildEdgeUpsert("REL", "Company", "id", "Company", "id", List.of(edge));
+        assertThat(stmts.get(0).cypher()).isEqualTo(
+                "MERGE (a:Company {id: $_src})\n"
+                        + "MERGE (b:Company {id: $_dst})\n"
+                        + "MERGE (a)-[e:REL]->(b)\n"
+                        + "SET e.w = $p_w\n"
+                        + "RETURN count(e) AS written");
+    }
+
+    @Test
+    void edgeDelete_withMergeKeys_narrowsToSpecificEdge() {
+        MergeCypherStatementBuilder mk = new MergeCypherStatementBuilder(List.of("rel_type"), false);
+        Edge edge = new Edge("REL", "Company", "id", "c1", "Company", "id", "c2", Map.of("rel_type", "placed_by"));
+        List<CypherStatement> stmts = mk.buildEdgeDelete("REL", "Company", "id", "Company", "id", List.of(edge));
+        assertThat(stmts.get(0).cypher()).isEqualTo(
+                "MATCH (a:Company {id: $_src})-[e:REL {rel_type: $mk_rel_type}]->(b:Company {id: $_dst}) DELETE e");
+        assertThat(stmts.get(0).parameters()).containsEntry("mk_rel_type", "placed_by");
+    }
+    @Test
     void invalidIdentifier_isRejected() {
         // TuGraph has no identifier quoting, so unsafe names (e.g. with a space or backtick) are refused.
         assertThatThrownBy(() -> builder.buildVertexUpsert(

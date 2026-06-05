@@ -201,6 +201,16 @@ CREATE TABLE invest_edge (
 > `edge.src.col` is the **table column** carrying the endpoint key value; `edge.src.key` is the
 > **vertex property** it is matched against (defaults to `edge.src.col` when omitted).
 
+**Multiple relation types between the same pair.** If you model relations with a single edge label
+discriminated by a property (e.g. one `REL` label with a `rel_type` column), set
+`'edge.merge.keys' = 'rel_type'` so the property is folded into the MERGE match
+(`MERGE (a)-[e:REL {rel_type: …}]->(b)`). Without it, two relations between the same two vertices
+collapse into one edge (last-write-wins). Multiple keys are comma-separated.
+
+**Out-of-order pipelines.** When vertices and edges arrive on separate, unordered jobs, set
+`'edge.on-missing-endpoint' = 'create'` to MERGE a bare endpoint vertex (key only) when it is
+missing, instead of `skip` (drop) or `fail` — making an at-least-once pipeline eventually consistent.
+
 ## Changelog & deletes
 
 Vertex tables declare a **primary key**, so they accept Flink's full **upsert changelog**: `INSERT`
@@ -293,7 +303,8 @@ columns map to the endpoint vertices.
 | `edge.src.key` | | = `edge.src.col` | Source vertex match property |
 | `edge.dst.label` / `edge.dst.col` | edge | — | Destination label / table column |
 | `edge.dst.key` | | = `edge.dst.col` | Destination vertex match property |
-| `edge.on-missing-endpoint` | | `skip` | `skip` (record metric) or `fail` |
+| `edge.merge.keys` | | — | Edge property columns folded into the MERGE match (e.g. `rel_type`) |
+| `edge.on-missing-endpoint` | | `skip` | `skip` (record metric), `fail`, or `create` (MERGE missing endpoint) |
 | `sink.batch.size` | | `500` | Flush threshold (rows) |
 | `sink.batch.interval.ms` | | `1000` | Flush threshold (time); `0` disables |
 | `sink.max.retries` | | `3` | Transient-failure retries |
