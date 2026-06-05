@@ -34,17 +34,22 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Measures single-subtask vertex write throughput (NFR-1) against a real TuGraph instance, in a
- * throwaway graph. Reports rows/s; the number is environment-dependent (network, hardware, server
- * load) and is recorded in the docs as a baseline rather than asserted strictly.
+ * throwaway graph. Compares sequential writes against the connector's concurrent path (a
+ * vertices-only upsert flush is written concurrently over the Bolt pool). Reports rows/s; numbers
+ * are environment-dependent and recorded in the docs as a baseline rather than asserted strictly.
  *
- * <p>Gated on {@code TUGRAPH_LIVE=1}. Override the row count with {@code TUGRAPH_BENCH_ROWS}.
+ * <p>Gated on {@code TUGRAPH_BENCH=1} (opt-in; not part of the regular suite). Override with {@code TUGRAPH_BENCH_ROWS} /
+ * {@code TUGRAPH_BENCH_CONCURRENCY}.
  */
-@EnabledIfEnvironmentVariable(named = "TUGRAPH_LIVE", matches = "1")
+@EnabledIfEnvironmentVariable(named = "TUGRAPH_BENCH", matches = "1")
 class TuGraphBenchmarkIT {
 
     private static final String GRAPH = "flink_bench_test";
@@ -55,8 +60,9 @@ class TuGraphBenchmarkIT {
     private static String pass() { String x = System.getenv("TUGRAPH_PASSWORD"); return x == null ? "73@TuGraph" : x; }
 
     @Test
-    void measuresVertexWriteThroughput() {
+    void measuresVertexWriteThroughput() throws Exception {
         int rows = Integer.parseInt(System.getenv().getOrDefault("TUGRAPH_BENCH_ROWS", "2000"));
+        int concurrency = Integer.parseInt(System.getenv().getOrDefault("TUGRAPH_BENCH_CONCURRENCY", "16"));
 
         try (Driver driver = GraphDatabase.driver(uri(), AuthTokens.basic(user(), pass()))) {
             try (Session sys = driver.session()) {
@@ -73,7 +79,9 @@ class TuGraphBenchmarkIT {
             }
 
             TuGraphSinkOptions options = TuGraphSinkOptions.builder()
-                    .uri(uri()).auth(user(), pass()).graph(GRAPH).build();
+                    .uri(uri()).auth(user(), pass()).graph(GRAPH)
+                    .maxConnectionPoolSize(concurrency)
+                    .build();
             MergeCypherStatementBuilder builder = new MergeCypherStatementBuilder();
 
             List<Vertex> vertices = new ArrayList<>(rows);
@@ -84,29 +92,34 @@ class TuGraphBenchmarkIT {
                 props.put("value", (double) i);
                 vertices.add(new Vertex(V, "id", "v" + i, props));
             }
-            int batchSize = Integer.parseInt(System.getenv().getOrDefault("TUGRAPH_BENCH_BATCH", "500"));
+            List<CypherStatement> statements = builder.buildVertexUpsert(V, "id", vertices);
 
             try (TuGraphConnection conn = new TuGraphConnection(options)) {
                 conn.open();
                 conn.verifyConnectivity();
-
-                // Warm up so the first-connection / classloading cost is excluded.
+                // Warm up so first-connection / classloading cost is excluded.
                 conn.writeBatch(builder.buildVertexUpsert(V, "id",
                         List.of(new Vertex(V, "id", "warmup", Map.of("id", "warmup")))));
 
+                // Concurrent path: write order-independent statements over the connection pool, the
+                // way a vertices-only flush does in TuGraphSinkWriter.
+                ExecutorService pool = Executors.newFixedThreadPool(concurrency);
                 long start = System.nanoTime();
-                for (int from = 0; from < rows; from += batchSize) {
-                    int to = Math.min(from + batchSize, rows);
-                    List<CypherStatement> statements =
-                            builder.buildVertexUpsert(V, "id", vertices.subList(from, to));
-                    conn.writeBatch(statements); // one flush = one Bolt session, like the sink
+                List<Future<Long>> futures = new ArrayList<>(statements.size());
+                for (CypherStatement statement : statements) {
+                    futures.add(pool.submit(() -> conn.writeBatch(statement)));
+                }
+                for (Future<Long> future : futures) {
+                    future.get();
                 }
                 long elapsedNanos = System.nanoTime() - start;
+                pool.shutdown();
 
                 double seconds = elapsedNanos / 1_000_000_000.0;
                 double rowsPerSec = rows / seconds;
                 System.out.printf("=== TuGraph write benchmark: %d vertices in %.2f s = %.0f rows/s "
-                        + "(single subtask, batch %d, %s) ===%n", rows, seconds, rowsPerSec, batchSize, uri());
+                        + "(single subtask, concurrency %d, %s) ===%n",
+                        rows, seconds, rowsPerSec, concurrency, uri());
 
                 assertThat(rowsPerSec).isGreaterThan(0);
             }

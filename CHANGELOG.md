@@ -26,10 +26,11 @@ All notable changes to this project are documented here. The format is based on
 ### Notes
 - Nested ARRAY/MAP/ROW types are **not supported**: TuGraph stores scalar properties only
   (`Unknown type name` for list/array). Serialize to a STRING column upstream if needed.
-- **Throughput (NFR-1):** measured ≈ 80 vertices/s per subtask on a development LAN instance. A
-  single connection cannot reach 5k rows/s because TuGraph commits one disk-synced `MERGE` per
-  element (no `UNWIND` batching / transactions); scale with sink parallelism. See `PACKAGING.md` and
-  the `TuGraphBenchmarkIT` benchmark.
+- **Throughput (NFR-1):** the sink writes order-independent flushes (vertices-only or edges-only
+  upserts) **concurrently** over the Bolt pool, ≈ 305 vertices/s/subtask (pool 16) vs ≈ 80
+  sequential on a development LAN instance — TuGraph serializes commits server-side, so a single
+  subtask still cannot reach 5k rows/s (no `UNWIND` batching / transactions). Scale with sink
+  parallelism. See `PACKAGING.md` and `TuGraphBenchmarkIT`.
 
 ## [0.1.0] - 2026-06-04
 

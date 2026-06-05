@@ -36,6 +36,10 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * Buffers graph change operations and flushes them to TuGraph as idempotent {@code MERGE} (upsert)
@@ -47,19 +51,24 @@ import java.util.List;
  * of the same key reaches TuGraph in the correct order. TuGraph requires one statement per element
  * (it rejects {@code UNWIND}-batched writes), which makes in-order processing the natural choice.
  *
- * <p><b>Threading.</b> {@link #write}, {@link #flush} and the processing-time callback all run on
- * the single task thread (Flink's mailbox), so the buffer needs no synchronization.
+ * <p><b>Concurrency optimization.</b> When a flush contains only upserts of a single kind
+ * (vertices-only or edges-only) the statements are order-independent (idempotent {@code MERGE}, and
+ * edge endpoints come from earlier flushes), so they are written concurrently over the Bolt
+ * connection pool — TuGraph's per-statement, disk-synced commits make this the main throughput lever
+ * within a subtask. Mixed (vertex+edge) or delete-containing flushes stay strictly sequential to
+ * preserve ordering / endpoint dependencies.
  *
- * <p><b>Flush triggers.</b> (1) the buffer reaching {@link TuGraphSinkOptions#batchSize()};
- * (2) a processing-time timer every {@link TuGraphSinkOptions#batchIntervalMs()} (when &gt; 0);
- * (3) Flink calling {@link #flush(boolean)} on every checkpoint and at end of input — giving
- * at-least-once delivery.
+ * <p><b>Threading.</b> {@link #write}, {@link #flush} and the processing-time callback all run on
+ * the single task thread (Flink's mailbox); the buffer needs no synchronization. Parallel writes use
+ * a private pool and the flush blocks until they complete (so flushing still back-pressures).
  *
  * @param <InputT> upstream record type
  */
 public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
 
     private static final Logger LOG = LoggerFactory.getLogger(TuGraphSinkWriter.class);
+
+    private static final int MAX_WRITE_THREADS = 16;
 
     /** A buffered change operation: a graph element plus whether it is a delete. */
     private static final class Op {
@@ -77,6 +86,7 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
     private final CypherStatementBuilder cypherBuilder;
     private final TuGraphConnection connection;
     private final ProcessingTimeService timeService;
+    private final ExecutorService writeExecutor;
 
     private final List<Op> buffer;
 
@@ -102,6 +112,9 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
 
         this.connection = new TuGraphConnection(options);
         this.connection.open();
+
+        int threads = Math.min(Math.max(1, options.maxConnectionPoolSize()), MAX_WRITE_THREADS);
+        this.writeExecutor = Executors.newFixedThreadPool(threads);
 
         this.numRecordsSend = metricGroup.getNumRecordsSendCounter();
         MetricGroup tg = metricGroup.addGroup("tugraph");
@@ -130,7 +143,7 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
         flushBuffer();
     }
 
-    /** Turn the buffer into ordered upsert/delete statements and write them in one Bolt session. */
+    /** Turn the buffer into ordered upsert/delete statements and write them. */
     private void flushBuffer() throws IOException {
         if (buffer.isEmpty()) {
             return;
@@ -138,6 +151,7 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
         long startNanos = System.nanoTime();
 
         List<CypherStatement> statements = new ArrayList<>(buffer.size());
+        int vertexUpserts = 0;
         int edgeUpserts = 0;
         int deletes = 0;
         for (Op op : buffer) {
@@ -149,6 +163,7 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
                     deletes++;
                 } else {
                     statements.addAll(cypherBuilder.buildVertexUpsert(v.label(), v.primaryKey(), List.of(v)));
+                    vertexUpserts++;
                 }
             } else if (e instanceof Edge) {
                 Edge ed = (Edge) e;
@@ -166,7 +181,14 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
             }
         }
 
-        long writtenEdges = connection.writeBatch(statements);
+        // Safe to parallelize only when the flush is a single upsert kind with no ordering / endpoint
+        // dependencies: vertices-only or edges-only, and no deletes.
+        boolean parallel = deletes == 0
+                && (vertexUpserts == 0 || edgeUpserts == 0)
+                && statements.size() > 1;
+        long writtenEdges = parallel
+                ? writeConcurrently(statements)
+                : connection.writeBatch(statements);
 
         long skipped = 0;
         if (edgeUpserts > 0 && writtenEdges != TuGraphConnection.NO_WRITTEN_COUNT) {
@@ -190,8 +212,40 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
         }
         flushCounter.inc();
         lastFlushLatencyMs = (System.nanoTime() - startNanos) / 1_000_000L;
-        LOG.debug("Flushed {} ops ({} deletes, {} edges skipped) to TuGraph in {} ms",
-                total, deletes, skipped, lastFlushLatencyMs);
+        LOG.debug("Flushed {} ops ({} deletes, {} edges skipped, parallel={}) to TuGraph in {} ms",
+                total, deletes, skipped, parallel, lastFlushLatencyMs);
+    }
+
+    /**
+     * Write order-independent statements concurrently over the connection pool. Each statement is an
+     * independent auto-commit query; the connection is thread-safe across sessions.
+     *
+     * @return the summed edge written-count, or {@link TuGraphConnection#NO_WRITTEN_COUNT}
+     */
+    private long writeConcurrently(List<CypherStatement> statements) throws IOException {
+        List<Future<Long>> futures = new ArrayList<>(statements.size());
+        for (CypherStatement statement : statements) {
+            futures.add(writeExecutor.submit(() -> connection.writeBatch(statement)));
+        }
+        long written = TuGraphConnection.NO_WRITTEN_COUNT;
+        try {
+            for (Future<Long> future : futures) {
+                long w = future.get();
+                if (w != TuGraphConnection.NO_WRITTEN_COUNT) {
+                    written = (written == TuGraphConnection.NO_WRITTEN_COUNT ? 0L : written) + w;
+                }
+            }
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while writing a TuGraph batch concurrently", ie);
+        } catch (ExecutionException ee) {
+            Throwable cause = ee.getCause();
+            if (cause instanceof RuntimeException) {
+                throw (RuntimeException) cause; // propagate driver exception to trigger Flink restart
+            }
+            throw new IOException("Concurrent TuGraph write failed", cause);
+        }
+        return written;
     }
 
     /** Register the next processing-time flush timer if time-based flushing is enabled. */
@@ -217,6 +271,7 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
         try {
             flushBuffer();
         } finally {
+            writeExecutor.shutdown();
             connection.close();
         }
     }

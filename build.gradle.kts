@@ -96,6 +96,7 @@ tasks.test {
     // Surface the integration-test toggles to the JVM running the tests.
     System.getenv("TUGRAPH_IT")?.let { environment("TUGRAPH_IT", it) }
     System.getenv("TUGRAPH_LIVE")?.let { environment("TUGRAPH_LIVE", it) }
+    System.getenv("TUGRAPH_BENCH")?.let { environment("TUGRAPH_BENCH", it) }
 }
 
 tasks.shadowJar {

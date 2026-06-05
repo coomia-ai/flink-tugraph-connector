@@ -60,29 +60,32 @@ For the SQL client, also `ADD JAR '/path/to/flink-tugraph-connector-<version>.ja
 ## Performance benchmark
 
 Because TuGraph rejects `UNWIND`-batched and multi-statement writes, the connector issues **one
-auto-commit `MERGE` per element** (sharing a Bolt session per flush). Throughput is therefore bound
-by per-write round-trips, each of which is a disk-synced commit on the server.
+auto-commit `MERGE` per element**. Throughput is bound by per-write round-trips, each a disk-synced
+commit on the server. The sink mitigates this by writing **order-independent flushes concurrently**
+over the Bolt connection pool (a vertices-only or edges-only upsert flush; mixed/delete flushes stay
+sequential — see `TuGraphSinkWriter`).
 
 ### Measured baseline
 
-| Metric | Value |
-|--------|-------|
-| Workload | 2000 vertices (3 props), `batchSize` 500, single subtask |
-| Environment | TuGraph-DB 4.x over Bolt, development LAN instance |
-| **Throughput** | **≈ 80 vertices/s per subtask** (≈ 12 ms / write) |
+| Path | Throughput (single subtask) |
+|------|-----------------------------|
+| Sequential (1 connection) | ≈ 80 vertices/s |
+| Concurrent (pool 16) | ≈ 305 vertices/s |
 
-This is well below the original ≥ 5k rows/s aspiration (NFR-1), which **is not reachable on a single
-connection given TuGraph's write model** (no `UNWIND` batching, no multi-statement transactions, a
-disk-synced commit per `MERGE`). It is a property of TuGraph, not of the connector.
+*2000 vertices (3 props) into TuGraph-DB 4.x over Bolt on a development LAN instance.*
 
-**To scale, increase sink parallelism** — each subtask uses its own connection, so throughput grows
-roughly linearly (N subtasks ≈ N × per-subtask rate). A low-latency network to TuGraph also helps,
-since per-write latency dominates.
+The concurrent path is ~3.8× faster, not 16×, because TuGraph serializes commits server-side (one
+disk-synced write at a time). All of this is still well below the original ≥ 5k rows/s aspiration
+(NFR-1), which **is not reachable** given TuGraph's write model — a property of TuGraph, not of the
+connector.
+
+**To scale further, increase sink parallelism** (each subtask has its own pool) and raise
+`max.connection.pool.size`; a low-latency network helps since per-write latency dominates.
 
 Reproduce on your own hardware (gated on `TUGRAPH_LIVE`):
 
 ```bash
-TUGRAPH_LIVE=1 ./gradlew test --tests *TuGraphBenchmarkIT   # override with TUGRAPH_BENCH_ROWS / _BATCH
+TUGRAPH_BENCH=1 ./gradlew test --tests *TuGraphBenchmarkIT   # override with TUGRAPH_BENCH_ROWS / _CONCURRENCY
 ```
 
 > Record the measured throughput and the environment (TuGraph version, hardware, network) alongside
