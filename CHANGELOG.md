@@ -24,8 +24,10 @@ All notable changes to this project are documented here. The format is based on
     TuGraph-DB 4.x.
 
 ### Notes
-- Nested ARRAY/MAP/ROW types are **not supported**: TuGraph stores scalar properties only
-  (`Unknown type name` for list/array). Serialize to a STRING column upstream if needed.
+- Nested ARRAY/MAP/ROW types are **not supported**: TuGraph has no generic list/map/JSON property
+  type (`Unknown type name`), and its non-scalar types are unusable over Bolt — `FLOAT_VECTOR` cannot
+  be set with Cypher (*"Function not implemented yet"*) and `BLOB` cannot be returned over Bolt
+  (*"ToBolt meet unsupported data type"*). Serialize such columns to a STRING upstream if needed.
 - **Throughput (NFR-1):** the sink writes order-independent flushes (vertices-only or edges-only
   upserts) **concurrently** over the Bolt pool, ≈ 305 vertices/s/subtask (pool 16) vs ≈ 80
   sequential on a development LAN instance — TuGraph serializes commits server-side, so a single
