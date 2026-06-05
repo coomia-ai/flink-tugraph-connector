@@ -365,6 +365,20 @@ image with `TUGRAPH_IMAGE` and credentials with `TUGRAPH_USERNAME` / `TUGRAPH_PA
 For the shaded-jar layout, cluster deployment and the performance benchmark, see
 [PACKAGING.md](PACKAGING.md).
 
+## Examples
+
+Runnable examples live under
+[`examples/`](src/main/java/com/coomia/flink/tugraph/examples/) (Java) and
+[`examples/sql/`](examples/sql/) (SQL scripts):
+
+| Example | API | Shows |
+|---------|-----|-------|
+| [`VertexSinkExample`](src/main/java/com/coomia/flink/tugraph/examples/VertexSinkExample.java) / [`EdgeSinkExample`](src/main/java/com/coomia/flink/tugraph/examples/EdgeSinkExample.java) | DataStream | upsert vertices / edges |
+| [`DataStreamDeleteExample`](src/main/java/com/coomia/flink/tugraph/examples/DataStreamDeleteExample.java) | DataStream | upsert + `asDelete()` (delete) |
+| [`SqlSinkExample`](src/main/java/com/coomia/flink/tugraph/examples/SqlSinkExample.java) | Flink SQL | write vertices & edges |
+| [`SqlSourceExample`](src/main/java/com/coomia/flink/tugraph/examples/SqlSourceExample.java) | Flink SQL | scan + projection/filter push-down, lookup join |
+| [`source_scan.sql`](examples/sql/source_scan.sql) / [`lookup_join.sql`](examples/sql/lookup_join.sql) | Flink SQL | source scan / dimension-table lookup |
+
 ## Roadmap
 
 - **v0.2 (in progress)** — bounded vertex `ScanTableSource` ✅, `LookupTableSource` with
