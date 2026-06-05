@@ -61,18 +61,29 @@ For the SQL client, also `ADD JAR '/path/to/flink-tugraph-connector-<version>.ja
 
 Because TuGraph rejects `UNWIND`-batched and multi-statement writes, the connector issues **one
 auto-commit `MERGE` per element** (sharing a Bolt session per flush). Throughput is therefore bound
-by per-statement round-trips: scale it with **sink parallelism** and a low-latency network to
-TuGraph rather than with a single large batch.
+by per-write round-trips, each of which is a disk-synced commit on the server.
 
-To reproduce on your own hardware:
+### Measured baseline
 
-1. Start a TuGraph-DB 4.x instance with Bolt enabled.
-2. Run a DataStream job that generates synthetic vertices (e.g. a `DataGeneratorSource`) into
-   `TuGraphSink` with `batchSize=500`, parallelism 1.
-3. Read `numRecordsSend` and `tugraph.flushLatencyMs` from the Flink metrics / web UI.
-4. Tune `sink.batch.size`, `sink.batch.interval.ms`, `max.connection.pool.size` and job parallelism
-   for your workload.
+| Metric | Value |
+|--------|-------|
+| Workload | 2000 vertices (3 props), `batchSize` 500, single subtask |
+| Environment | TuGraph-DB 4.x over Bolt, development LAN instance |
+| **Throughput** | **≈ 80 vertices/s per subtask** (≈ 12 ms / write) |
+
+This is well below the original ≥ 5k rows/s aspiration (NFR-1), which **is not reachable on a single
+connection given TuGraph's write model** (no `UNWIND` batching, no multi-statement transactions, a
+disk-synced commit per `MERGE`). It is a property of TuGraph, not of the connector.
+
+**To scale, increase sink parallelism** — each subtask uses its own connection, so throughput grows
+roughly linearly (N subtasks ≈ N × per-subtask rate). A low-latency network to TuGraph also helps,
+since per-write latency dominates.
+
+Reproduce on your own hardware (gated on `TUGRAPH_LIVE`):
+
+```bash
+TUGRAPH_LIVE=1 ./gradlew test --tests *TuGraphBenchmarkIT   # override with TUGRAPH_BENCH_ROWS / _BATCH
+```
 
 > Record the measured throughput and the environment (TuGraph version, hardware, network) alongside
-> your results. Numbers vary widely with deployment, so this connector ships the knobs rather than a
-> single headline figure.
+> your results — numbers vary widely with deployment.

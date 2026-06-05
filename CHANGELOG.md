@@ -26,6 +26,10 @@ All notable changes to this project are documented here. The format is based on
 ### Notes
 - Nested ARRAY/MAP/ROW types are **not supported**: TuGraph stores scalar properties only
   (`Unknown type name` for list/array). Serialize to a STRING column upstream if needed.
+- **Throughput (NFR-1):** measured ≈ 80 vertices/s per subtask on a development LAN instance. A
+  single connection cannot reach 5k rows/s because TuGraph commits one disk-synced `MERGE` per
+  element (no `UNWIND` batching / transactions); scale with sink parallelism. See `PACKAGING.md` and
+  the `TuGraphBenchmarkIT` benchmark.
 
 ## [0.1.0] - 2026-06-04
 
