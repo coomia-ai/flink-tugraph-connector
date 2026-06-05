@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **Table/SQL source (v0.2)** under the same `'connector' = 'tugraph'`:
+  - **Bounded vertex scan** (`ScanTableSource`) — paginated `MATCH … RETURN … ORDER BY pk SKIP/LIMIT`
+    via an `InputFormat`.
+  - **Dimension-table lookup** (`LookupTableSource`) — point lookup by join key for streaming
+    enrichment, with an optional `LookupCache` (`lookup.cache.max-rows` / `lookup.cache.ttl`).
+  - **Projection push-down** (`SupportsProjectionPushDown`) — only the requested columns are read.
+  - New read options `scan.fetch-size`, `lookup.cache.max-rows`, `lookup.cache.ttl`,
+    `lookup.max-retries`; `TuGraphConnection.read`, `CypherQueryBuilder` and a row-to-`RowData`
+    converter. Verified end-to-end (scan + projection + lookup) against live TuGraph-DB 4.x.
+  - v0.2 reads vertices only; edge source, filter push-down and nested types are planned.
+
 ## [0.1.0] - 2026-06-04
 
 ### Added
