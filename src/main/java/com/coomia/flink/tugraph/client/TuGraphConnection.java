@@ -35,8 +35,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -138,6 +140,36 @@ public class TuGraphConnection implements AutoCloseable, Serializable {
         }
     }
 
+    /**
+     * Execute a read query, returning each row as a map of result alias to value (raw Bolt Java
+     * types: String / Long / Double / Boolean / List / Map / null). Retries transient failures.
+     *
+     * @param stmt the parameterized read query
+     * @return the result rows
+     */
+    public List<Map<String, Object>> read(CypherStatement stmt) {
+        ensureOpen();
+        int attempt = 0;
+        while (true) {
+            try (Session session = driver.session(SessionConfig.forDatabase(options.graph()))) {
+                List<Map<String, Object>> rows = new ArrayList<>();
+                for (Record record : session.run(stmt.cypher(), stmt.parameters()).list()) {
+                    rows.add(record.asMap());
+                }
+                return rows;
+            } catch (TransientException | ServiceUnavailableException | SessionExpiredException ex) {
+                if (attempt >= options.maxRetries()) {
+                    LOG.error("TuGraph read failed after {} retries", options.maxRetries(), ex);
+                    throw ex;
+                }
+                long backoffMs = backoffMillis(attempt);
+                LOG.warn("Transient TuGraph read failure (attempt {}/{}), retrying in {} ms: {}",
+                        attempt + 1, options.maxRetries(), backoffMs, ex.getMessage());
+                sleep(backoffMs);
+                attempt++;
+            }
+        }
+    }
     /** Read the single {@code written} count produced by an edge upsert, if present. */
     private static long readWrittenCount(Result result) {
         List<Record> records = result.list();

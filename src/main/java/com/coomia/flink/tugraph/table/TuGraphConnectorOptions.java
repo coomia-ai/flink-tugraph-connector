@@ -126,4 +126,21 @@ public final class TuGraphConnectorOptions {
     public static final ConfigOption<Integer> SINK_MAX_RETRIES = ConfigOptions.key("sink.max.retries")
             .intType().defaultValue(3)
             .withDescription("Number of retries for transient write failures.");
+
+    // ---- Source / Lookup (v0.2) ----
+    public static final ConfigOption<Integer> SCAN_FETCH_SIZE = ConfigOptions.key("scan.fetch-size")
+            .intType().defaultValue(1000)
+            .withDescription("Page size for the bounded vertex scan (SKIP/LIMIT paging).");
+
+    public static final ConfigOption<Long> LOOKUP_CACHE_MAX_ROWS = ConfigOptions.key("lookup.cache.max-rows")
+            .longType().defaultValue(0L)
+            .withDescription("Maximum rows held in the lookup cache; 0 disables caching.");
+
+    public static final ConfigOption<Duration> LOOKUP_CACHE_TTL = ConfigOptions.key("lookup.cache.ttl")
+            .durationType().noDefaultValue()
+            .withDescription("Lookup cache entry time-to-live (expire after write).");
+
+    public static final ConfigOption<Integer> LOOKUP_MAX_RETRIES = ConfigOptions.key("lookup.max-retries")
+            .intType().defaultValue(3)
+            .withDescription("Number of retries for a failed lookup query.");
 }

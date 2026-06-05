@@ -14,3 +14,4 @@
 # limitations under the License.
 
 com.coomia.flink.tugraph.table.TuGraphDynamicTableSinkFactory
+com.coomia.flink.tugraph.table.TuGraphDynamicTableSourceFactory
