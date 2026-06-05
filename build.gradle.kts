@@ -64,6 +64,9 @@ dependencies {
 tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
     options.compilerArgs.add("-Xlint:all,-processing")
+    // Target Java 17 bytecode so the jar loads on Java 17 Flink 1.20 clusters (and Java 21).
+    // The build may run on a newer JDK (toolchain 21); the source uses no Java 18+ features.
+    options.release.set(17)
 }
 
 tasks.withType<Javadoc>().configureEach {
@@ -110,9 +113,34 @@ tasks.shadowJar {
     mergeServiceFiles()
 }
 
-// `build` should also produce the redistributable shaded jar.
+// ---- Java 21 build variant (classifier 'jdk21') ----
+// The main shaded jar above is Java 17 bytecode and already runs on Java 21; this variant is for
+// users who specifically want a native Java 21 build. Same sources, compiled with --release 21.
+val compileJava21 = tasks.register<JavaCompile>("compileJava21") {
+    source(sourceSets.main.get().java)
+    classpath = sourceSets.main.get().compileClasspath
+    destinationDirectory.set(layout.buildDirectory.dir("classes/java21/main"))
+    options.encoding = "UTF-8"
+    options.release.set(21)
+}
+
+val shadowJar21 = tasks.register<com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar>("shadowJar21") {
+    group = "shadow"
+    description = "Builds the shaded jar with Java 21 bytecode (classifier 'jdk21')."
+    archiveClassifier.set("jdk21")
+    from(compileJava21.flatMap { it.destinationDirectory })
+    from(layout.buildDirectory.dir("resources/main"))
+    dependsOn(tasks.named("processResources"))
+    configurations = listOf(project.configurations.runtimeClasspath.get())
+    relocate("org.neo4j.driver", "com.coomia.flink.tugraph.shaded.neo4j.driver")
+    relocate("io.netty", "com.coomia.flink.tugraph.shaded.netty")
+    relocate("org.reactivestreams", "com.coomia.flink.tugraph.shaded.reactivestreams")
+    mergeServiceFiles()
+}
+
+// `build` produces both shaded jars: Java 17 (main) and Java 21 ('jdk21').
 tasks.build {
-    dependsOn(tasks.shadowJar)
+    dependsOn(tasks.shadowJar, shadowJar21)
 }
 
 publishing {

@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **Jar now targets Java 17 bytecode** (`--release 17`) so it loads on **Java 17** Flink 1.20
+  clusters as well as Java 21. Previously the build emitted Java 21 bytecode (class version 65),
+  which failed to load on a Java 17 cluster (`UnsupportedClassVersionError`). The build toolchain
+  stays JDK 21; the sources use no Java 18+ features. Verified class version 61.
+- **`build` now publishes two shaded jars** — the default `flink-tugraph-connector-<version>.jar`
+  (Java 17) and an optional `flink-tugraph-connector-<version>-jdk21.jar` (Java 21, classifier
+  `jdk21`) for users who want a native Java 21 build. Both relocate the Bolt driver/Netty/Reactive
+  Streams and carry the Table Factory SPI entry. Pick the Java 17 jar by default.
+
 ### Fixed
 - **Edge MERGE could silently drop relations (data loss).** With a single edge label discriminated
   by a property (e.g. one `REL` label + `rel_type`), two relation types between the same vertex pair
