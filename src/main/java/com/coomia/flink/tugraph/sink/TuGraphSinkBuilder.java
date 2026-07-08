@@ -19,6 +19,7 @@ package com.coomia.flink.tugraph.sink;
 
 import com.coomia.flink.tugraph.TuGraphSinkOptions;
 import com.coomia.flink.tugraph.TuGraphSinkOptions.OnMissingEndpoint;
+import com.coomia.flink.tugraph.TuGraphSinkOptions.OnMissingLabel;
 import com.coomia.flink.tugraph.cypher.CypherStatementBuilder;
 import com.coomia.flink.tugraph.cypher.MergeCypherStatementBuilder;
 import com.coomia.flink.tugraph.element.GraphElement;
@@ -99,6 +100,15 @@ public class TuGraphSinkBuilder<T extends GraphElement> {
 
     public TuGraphSinkBuilder<T> onMissingEndpoint(OnMissingEndpoint onMissingEndpoint) {
         options.onMissingEndpoint(onMissingEndpoint);
+        return this;
+    }
+
+    /**
+     * Behaviour when a vertex write targets a label missing from the graph schema: fail the job
+     * (default) or skip the record and count it in {@code tugraph.vertexSkipped}.
+     */
+    public TuGraphSinkBuilder<T> onMissingLabel(OnMissingLabel onMissingLabel) {
+        options.onMissingLabel(onMissingLabel);
         return this;
     }
 

@@ -18,6 +18,7 @@
 package com.coomia.flink.tugraph.table;
 
 import com.coomia.flink.tugraph.TuGraphSinkOptions.OnMissingEndpoint;
+import com.coomia.flink.tugraph.TuGraphSinkOptions.OnMissingLabel;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
 
@@ -79,6 +80,13 @@ public final class TuGraphConnectorOptions {
     public static final ConfigOption<String> VERTEX_PRIMARY_KEY = ConfigOptions.key("vertex.primary-key")
             .stringType().noDefaultValue()
             .withDescription("Primary-key column; defaults to the table's PRIMARY KEY constraint.");
+
+    public static final ConfigOption<OnMissingLabel> VERTEX_ON_MISSING_LABEL =
+            ConfigOptions.key("vertex.on-missing-label")
+                    .enumType(OnMissingLabel.class).defaultValue(OnMissingLabel.FAIL)
+                    .withDescription("Behaviour when a vertex write targets a label missing from the"
+                            + " graph schema: FAIL the job (default) or SKIP the record and count it"
+                            + " in the tugraph.vertexSkipped metric.");
 
     // ---- Edge ----
     public static final ConfigOption<String> EDGE_LABEL = ConfigOptions.key("edge.label")

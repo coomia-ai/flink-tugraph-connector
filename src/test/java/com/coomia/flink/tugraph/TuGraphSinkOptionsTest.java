@@ -39,6 +39,18 @@ class TuGraphSinkOptionsTest {
         assertThat(o.connectionTimeoutMs()).isEqualTo(15_000L);
         assertThat(o.maxConnectionPoolSize()).isEqualTo(10);
         assertThat(o.onMissingEndpoint()).isEqualTo(TuGraphSinkOptions.OnMissingEndpoint.SKIP);
+        assertThat(o.onMissingLabel()).isEqualTo(TuGraphSinkOptions.OnMissingLabel.FAIL);
+    }
+
+    @Test
+    void build_appliesOnMissingLabel() {
+        TuGraphSinkOptions o = TuGraphSinkOptions.builder()
+                .uri("bolt://localhost:7687")
+                .auth("admin", "secret")
+                .onMissingLabel(TuGraphSinkOptions.OnMissingLabel.SKIP)
+                .build();
+
+        assertThat(o.onMissingLabel()).isEqualTo(TuGraphSinkOptions.OnMissingLabel.SKIP);
     }
 
     @Test

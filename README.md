@@ -33,7 +33,7 @@ oriented Bolt-based implementation modelled on the maturity of `nebula-flink-con
 - **Pluggable Cypher dialect** — Cypher generation sits behind `CypherStatementBuilder`, so a
   TuGraph build that lacks `SET x += $map` can be supported by swapping one class.
 - **Observability** — standard `numRecordsSend` plus custom `tugraph.flushCount`,
-  `tugraph.flushLatencyMs` and `tugraph.edgeSkipped` metrics.
+  `tugraph.flushLatencyMs`, `tugraph.edgeSkipped` and `tugraph.vertexSkipped` metrics.
 - **Self-contained jar** — the Bolt driver (and Netty) are shaded and relocated to avoid classpath
   clashes on the Flink cluster.
 
@@ -103,7 +103,7 @@ on Java 21.
 
 ```kotlin
 dependencies {
-    implementation("com.coomia.flink:flink-tugraph-connector:0.1.0")
+    implementation("com.coomia.flink:flink-tugraph-connector:0.2.0")
 }
 ```
 
@@ -220,6 +220,12 @@ collapse into one edge (last-write-wins). Multiple keys are comma-separated.
 `'edge.on-missing-endpoint' = 'create'` to MERGE a bare endpoint vertex (key only) when it is
 missing, instead of `skip` (drop) or `fail` — making an at-least-once pipeline eventually consistent.
 
+**Labels created after the job starts.** A vertex write whose label is missing from the graph
+schema (TuGraph: `No such vertex label: …`) fails the job by default. When new labels may appear
+while a streaming job is running, set `'vertex.on-missing-label' = 'skip'` to drop only the
+offending records (counted in `tugraph.vertexSkipped`) and keep the rest of the batch flowing —
+the vertex-side counterpart of `edge.on-missing-endpoint = skip`.
+
 ## Changelog & deletes
 
 Vertex tables declare a **primary key**, so they accept Flink's full **upsert changelog**: `INSERT`
@@ -307,6 +313,7 @@ columns map to the endpoint vertices.
 | `element.type` | ✔ (SQL) | — | `vertex` or `edge` |
 | `vertex.label` | vertex | — | Vertex label |
 | `vertex.primary-key` | | from PK constraint | Primary-key column |
+| `vertex.on-missing-label` | | `fail` | `fail` the job or `skip` (record metric) vertices whose label is missing from the schema |
 | `edge.label` | edge | — | Edge label |
 | `edge.src.label` / `edge.src.col` | edge | — | Source label / table column |
 | `edge.src.key` | | = `edge.src.col` | Source vertex match property |
@@ -357,6 +364,7 @@ columns map to the endpoint vertices.
 | `tugraph.flushCount` | counter | number of flush operations |
 | `tugraph.flushLatencyMs` | gauge | last flush latency (ms) |
 | `tugraph.edgeSkipped` | counter | edges skipped due to missing endpoints |
+| `tugraph.vertexSkipped` | counter | vertices skipped due to a missing vertex label (`vertex.on-missing-label = skip`) |
 | `tugraph.deleted` | counter | elements deleted (changelog DELETE) |
 
 ## Architecture
@@ -452,7 +460,7 @@ TuGraph-DB 没有官方 Flink 连接器，本项目以 `nebula-flink-connector` 
 - **可插拔 Cypher 方言**：Cypher 生成位于 `CypherStatementBuilder` 之后，若目标 TuGraph 不支持
   `SET x += $map`，替换一个实现类即可降级。
 - **可观测**：标准 `numRecordsSend` 加自定义 `tugraph.flushCount`、`tugraph.flushLatencyMs`、
-  `tugraph.edgeSkipped` 指标。
+  `tugraph.edgeSkipped`、`tugraph.vertexSkipped` 指标。
 - **自包含 jar**：Bolt 驱动（及 Netty）被 shade 并 relocate，避免与 Flink 集群上的其它依赖冲突。
 
 ### 版本矩阵
@@ -540,7 +548,9 @@ stream.add(new Vertex("Company", "company_id", "c1", props).asDelete()); // 删�
 - `element.type` 取 `vertex` / `edge`；
 - 边的 `edge.src.col` 是**表中承载端点键值的列**，`edge.src.key` 是该值要匹配的**顶点属性名**
   （省略时默认等于 `edge.src.col`）；
-- `edge.on-missing-endpoint` 取 `skip`（默认，记录指标）或 `fail`（抛异常重启）。
+- `edge.on-missing-endpoint` 取 `skip`（默认，记录指标）或 `fail`（抛异常重启）；
+- `vertex.on-missing-label` 取 `fail`（默认，标签缺失时作业失败）或 `skip`（跳过该记录并计入
+  `tugraph.vertexSkipped` 指标）——流式作业运行期间尚未建好新标签时，可避免单条记录拖垮整个作业。
 
 ### 配置项、类型映射、指标
 

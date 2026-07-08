@@ -53,6 +53,7 @@ import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.SINK_MAX_RE
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.URI;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.USERNAME;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.VERTEX_LABEL;
+import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.VERTEX_ON_MISSING_LABEL;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.VERTEX_PRIMARY_KEY;
 
 /**
@@ -86,6 +87,7 @@ public class TuGraphDynamicTableSinkFactory implements DynamicTableSinkFactory {
         options.add(MAX_CONNECTION_POOL_SIZE);
         options.add(VERTEX_LABEL);
         options.add(VERTEX_PRIMARY_KEY);
+        options.add(VERTEX_ON_MISSING_LABEL);
         options.add(EDGE_LABEL);
         options.add(EDGE_SRC_LABEL);
         options.add(EDGE_SRC_COL);
@@ -117,6 +119,7 @@ public class TuGraphDynamicTableSinkFactory implements DynamicTableSinkFactory {
                 .connectionTimeoutMs(config.get(CONNECTION_TIMEOUT).toMillis())
                 .maxConnectionPoolSize(config.get(MAX_CONNECTION_POOL_SIZE))
                 .onMissingEndpoint(config.get(EDGE_ON_MISSING_ENDPOINT))
+                .onMissingLabel(config.get(VERTEX_ON_MISSING_LABEL))
                 .edgeMergeKeys(config.getOptional(EDGE_MERGE_KEYS).orElse(java.util.Collections.emptyList()))
                 .build();
 

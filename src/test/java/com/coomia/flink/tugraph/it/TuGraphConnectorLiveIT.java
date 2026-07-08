@@ -47,6 +47,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * End-to-end validation of the connector against a real TuGraph instance, run inside a dedicated
@@ -269,6 +270,50 @@ class TuGraphConnectorLiveIT {
             conn.writeBatch(eb.buildEdgeUpsert("PROBE_REL", V, "company_id", V, "company_id", List.of(placed)));
             assertThat(count("MATCH ()-[e:PROBE_REL]->() RETURN count(e) AS c")).isEqualTo(2L);
         }
+    }
+
+    @Test
+    void missingVertexLabelIsRecordLevelWhenSkipEnabled() {
+        MergeCypherStatementBuilder builder = new MergeCypherStatementBuilder();
+        try (TuGraphConnection conn = new TuGraphConnection(options())) {
+            conn.open();
+
+            Vertex good = vertices().get(0);
+            Vertex noLabel = new Vertex("ProbeNoSuchLabel", "company_id", "x1",
+                    mutableMap("company_id", "x1", "name", "Ghost"));
+            List<com.coomia.flink.tugraph.cypher.CypherStatement> statements =
+                    new java.util.ArrayList<>();
+            statements.addAll(builder.buildVertexUpsert(V, "company_id", List.of(good)));
+            statements.addAll(builder.buildVertexUpsert("ProbeNoSuchLabel", "company_id", List.of(noLabel)));
+
+            // Default (no skip mask): the schema error fails the whole batch.
+            assertThatThrownBy(() -> conn.writeBatch(statements))
+                    .hasMessageContaining("No such vertex label");
+
+            // Skip mask: the bad record is skipped and counted; the good record still lands.
+            TuGraphConnection.BatchWriteResult result =
+                    conn.writeBatch(statements, new boolean[] {true, true});
+            assertThat(result.skippedMissingLabel()).isEqualTo(1);
+            assertThat(count("MATCH (n:" + V + " {company_id:'p1'}) RETURN count(n) AS c")).isEqualTo(1L);
+        }
+    }
+
+    @Test
+    void missingVertexLabelSkipKeepsDataStreamJobAlive() throws Exception {
+        // The issue scenario: one vertex targets a label absent from the schema. With
+        // vertex.on-missing-label=skip the job must finish and write the valid vertices.
+        Vertex noLabel = new Vertex("ProbeNoSuchLabel", "company_id", "x1",
+                mutableMap("company_id", "x1", "name", "Ghost"));
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+        env.fromData(vertices().get(0), noLabel, vertices().get(1))
+                .sinkTo(TuGraphSink.<Vertex>builder()
+                        .uri(uri()).auth(user(), pass()).graph(GRAPH).batchSize(3)
+                        .onMissingLabel(TuGraphSinkOptions.OnMissingLabel.SKIP)
+                        .build());
+        env.execute("tugraph-live-missing-label-job");
+
+        assertThat(count("MATCH (n:" + V + ") RETURN count(n) AS c")).isEqualTo(2L);
     }
 
     @Test
