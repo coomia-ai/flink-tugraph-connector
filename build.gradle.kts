@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "com.coomia.flink"
-version = "0.1.0"
+version = "0.2.0"
 description = "Apache Flink connector for TuGraph-DB over the Bolt protocol (DataStream Sink + Table/SQL)."
 
 java {

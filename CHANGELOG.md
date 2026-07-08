@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-08
+
 ### Changed
 - **Jar now targets Java 17 bytecode** (`--release 17`) so it loads on **Java 17** Flink 1.20
   clusters as well as Java 21. Previously the build emitted Java 21 bytecode (class version 65),
@@ -17,6 +19,11 @@ All notable changes to this project are documented here. The format is based on
   Streams and carry the Table Factory SPI entry. Pick the Java 17 jar by default.
 
 ### Fixed
+- **A missing vertex label crashed the whole job as an uncaught `AsynchronousException`.** A flush
+  triggered by the batch-interval timer now never lets its exception escape the timer callback; the
+  failure is recorded and rethrown from the next `write`/`flush` on the task thread, so it goes
+  through Flink's regular failure handling (no more restart loop from the timer thread; the buffer
+  is only cleared on success, so at-least-once is preserved).
 - **Edge MERGE could silently drop relations (data loss).** With a single edge label discriminated
   by a property (e.g. one `REL` label + `rel_type`), two relation types between the same vertex pair
   collapsed into one edge (last-write-wins). New **`edge.merge.keys`** option folds property columns
@@ -24,6 +31,13 @@ All notable changes to this project are documented here. The format is based on
   edge deletes to the specific edge. Verified live (placed_by + shipped_to kept as 2 edges, idempotent).
 
 ### Added
+- **`vertex.on-missing-label = skip | fail`** (default `fail`, the previous behaviour) — with
+  `skip`, a vertex write whose label does not exist in the graph schema (TuGraph:
+  `No such vertex label: …`) is skipped **record-level** and counted in the new
+  **`tugraph.vertexSkipped`** metric instead of failing the whole flush, mirroring
+  `edge.on-missing-endpoint = skip` / `tugraph.edgeSkipped`. Also available on the DataStream
+  builder as `onMissingLabel(OnMissingLabel)`. Vertex deletes on a missing label are skipped
+  the same way (a no-op); edge writes are not affected by this option.
 - **`edge.on-missing-endpoint = create`** — MERGE a bare endpoint vertex (key only) when an edge
   endpoint is missing, instead of `skip` / `fail`, so out-of-order at-least-once pipelines become
   eventually consistent. Verified live.
@@ -85,5 +99,6 @@ All notable changes to this project are documented here. The format is based on
   integration tests (gated on `TUGRAPH_IT=1`).
 - Runnable examples for DataStream and Flink SQL.
 
-[Unreleased]: https://github.com/coomia-ai/flink-tugraph-connector/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/coomia-ai/flink-tugraph-connector/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/coomia-ai/flink-tugraph-connector/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/coomia-ai/flink-tugraph-connector/releases/tag/v0.1.0
