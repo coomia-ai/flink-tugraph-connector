@@ -46,6 +46,14 @@ public final class TuGraphSinkOptions implements Serializable {
         CREATE
     }
 
+    /** Strategy applied when a vertex write targets a label that does not exist in the schema. */
+    public enum OnMissingLabel {
+        /** Skip the vertex, record the {@code tugraph.vertexSkipped} metric, and keep flushing. */
+        SKIP,
+        /** Fail the write, triggering a Flink restart (default, matches pre-0.2 behaviour). */
+        FAIL
+    }
+
     // ---- Connection ----
     private final String uri;
     private final String username;
@@ -63,6 +71,9 @@ public final class TuGraphSinkOptions implements Serializable {
     private final OnMissingEndpoint onMissingEndpoint;
     private final List<String> edgeMergeKeys;
 
+    // ---- Vertex behaviour ----
+    private final OnMissingLabel onMissingLabel;
+
     private TuGraphSinkOptions(Builder b) {
         this.uri = b.uri;
         this.username = b.username;
@@ -75,6 +86,7 @@ public final class TuGraphSinkOptions implements Serializable {
         this.maxRetries = b.maxRetries;
         this.onMissingEndpoint = b.onMissingEndpoint;
         this.edgeMergeKeys = b.edgeMergeKeys;
+        this.onMissingLabel = b.onMissingLabel;
     }
 
     public String uri() {
@@ -122,6 +134,10 @@ public final class TuGraphSinkOptions implements Serializable {
         return edgeMergeKeys;
     }
 
+    public OnMissingLabel onMissingLabel() {
+        return onMissingLabel;
+    }
+
     public static Builder builder() {
         return new Builder();
     }
@@ -138,6 +154,7 @@ public final class TuGraphSinkOptions implements Serializable {
                 + ", connectionTimeoutMs=" + connectionTimeoutMs
                 + ", maxConnectionPoolSize=" + maxConnectionPoolSize
                 + ", onMissingEndpoint=" + onMissingEndpoint
+                + ", onMissingLabel=" + onMissingLabel
                 + '}';
     }
 
@@ -154,6 +171,7 @@ public final class TuGraphSinkOptions implements Serializable {
         private int maxRetries = 3;
         private OnMissingEndpoint onMissingEndpoint = OnMissingEndpoint.SKIP;
         private List<String> edgeMergeKeys = Collections.emptyList();
+        private OnMissingLabel onMissingLabel = OnMissingLabel.FAIL;
 
         private Builder() {
         }
@@ -224,6 +242,15 @@ public final class TuGraphSinkOptions implements Serializable {
 
         public Builder onMissingEndpoint(OnMissingEndpoint onMissingEndpoint) {
             this.onMissingEndpoint = onMissingEndpoint;
+            return this;
+        }
+
+        /**
+         * Behaviour when a vertex write targets a label missing from the graph schema. Defaults to
+         * {@link OnMissingLabel#FAIL}.
+         */
+        public Builder onMissingLabel(OnMissingLabel onMissingLabel) {
+            this.onMissingLabel = onMissingLabel;
             return this;
         }
 

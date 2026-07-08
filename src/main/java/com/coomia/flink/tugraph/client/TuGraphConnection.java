@@ -28,6 +28,7 @@ import org.neo4j.driver.Record;
 import org.neo4j.driver.Result;
 import org.neo4j.driver.Session;
 import org.neo4j.driver.SessionConfig;
+import org.neo4j.driver.exceptions.Neo4jException;
 import org.neo4j.driver.exceptions.ServiceUnavailableException;
 import org.neo4j.driver.exceptions.SessionExpiredException;
 import org.neo4j.driver.exceptions.TransientException;
@@ -62,6 +63,30 @@ public class TuGraphConnection implements AutoCloseable, Serializable {
 
     /** Sentinel meaning no statement in the batch reported a written count (e.g. vertex upserts). */
     public static final long NO_WRITTEN_COUNT = -1L;
+
+    /**
+     * Outcome of {@link #writeBatch(List, boolean[])}: the summed edge written-count plus the number
+     * of statements skipped because their vertex label is missing from the graph schema.
+     */
+    public static final class BatchWriteResult {
+        private final long written;
+        private final int skippedMissingLabel;
+
+        public BatchWriteResult(long written, int skippedMissingLabel) {
+            this.written = written;
+            this.skippedMissingLabel = skippedMissingLabel;
+        }
+
+        /** @return summed edge written-count, or {@link #NO_WRITTEN_COUNT} if none was reported. */
+        public long written() {
+            return written;
+        }
+
+        /** @return statements skipped because their vertex label does not exist in the schema. */
+        public int skippedMissingLabel() {
+            return skippedMissingLabel;
+        }
+    }
 
     private final TuGraphSinkOptions options;
 
@@ -108,23 +133,54 @@ public class TuGraphConnection implements AutoCloseable, Serializable {
      *         statement returns such a field (e.g. vertex upserts)
      */
     public long writeBatch(List<CypherStatement> statements) {
+        return writeBatch(statements, null).written();
+    }
+
+    /**
+     * Like {@link #writeBatch(List)}, but statements flagged in {@code skippableOnMissingLabel} that
+     * fail because their vertex label does not exist in the graph schema are skipped (and counted)
+     * instead of failing the whole batch — the record-level behaviour behind
+     * {@code vertex.on-missing-label = skip}.
+     *
+     * @param statements               the parameterized statements (run in order)
+     * @param skippableOnMissingLabel  per-statement flags, aligned by index with {@code statements};
+     *                                 {@code null} means no statement may be skipped
+     * @return the summed edge written-count and the number of skipped statements
+     */
+    public BatchWriteResult writeBatch(List<CypherStatement> statements,
+                                       boolean[] skippableOnMissingLabel) {
         if (statements == null || statements.isEmpty()) {
-            return NO_WRITTEN_COUNT;
+            return new BatchWriteResult(NO_WRITTEN_COUNT, 0);
         }
         ensureOpen();
         int attempt = 0;
         while (true) {
             try (Session session = driver.session(SessionConfig.forDatabase(options.graph()))) {
                 long written = NO_WRITTEN_COUNT;
-                for (CypherStatement stmt : statements) {
-                    // TuGraph supports auto-commit only (no explicit/managed transactions over Bolt),
-                    // so each statement commits on its own; idempotent MERGE keeps replays safe.
-                    long w = readWrittenCount(session.run(stmt.cypher(), stmt.parameters()));
+                int skipped = 0;
+                for (int i = 0; i < statements.size(); i++) {
+                    CypherStatement stmt = statements.get(i);
+                    long w;
+                    try {
+                        // TuGraph supports auto-commit only (no explicit/managed transactions over
+                        // Bolt), so each statement commits on its own; idempotent MERGE keeps
+                        // replays safe.
+                        w = readWrittenCount(session.run(stmt.cypher(), stmt.parameters()));
+                    } catch (Neo4jException ex) {
+                        if (skippableOnMissingLabel != null && skippableOnMissingLabel[i]
+                                && isMissingVertexLabel(ex)) {
+                            skipped++;
+                            LOG.debug("Skipping statement for a missing vertex label: {}",
+                                    ex.getMessage());
+                            continue;
+                        }
+                        throw ex; // transient subtypes fall through to the retry handler below
+                    }
                     if (w != NO_WRITTEN_COUNT) {
                         written = (written == NO_WRITTEN_COUNT ? 0L : written) + w;
                     }
                 }
-                return written;
+                return new BatchWriteResult(written, skipped);
             } catch (TransientException | ServiceUnavailableException | SessionExpiredException ex) {
                 if (attempt >= options.maxRetries()) {
                     LOG.error("TuGraph write failed after {} retries; propagating to trigger restart",
@@ -170,6 +226,21 @@ public class TuGraphConnection implements AutoCloseable, Serializable {
             }
         }
     }
+    /**
+     * Whether the failure is TuGraph rejecting a statement because its vertex label is not defined
+     * in the graph schema (e.g. {@code DatabaseException: No such vertex label: orders}). Such
+     * errors are deterministic per record — retrying cannot fix them, but other records in the
+     * batch are unaffected.
+     */
+    static boolean isMissingVertexLabel(Neo4jException ex) {
+        if (ex instanceof TransientException || ex instanceof ServiceUnavailableException
+                || ex instanceof SessionExpiredException) {
+            return false;
+        }
+        String message = ex.getMessage();
+        return message != null && message.contains("No such vertex label");
+    }
+
     /** Read the single {@code written} count produced by an edge upsert, if present. */
     private static long readWrittenCount(Result result) {
         List<Record> records = result.list();

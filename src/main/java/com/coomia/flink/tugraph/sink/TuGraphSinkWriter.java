@@ -19,7 +19,9 @@ package com.coomia.flink.tugraph.sink;
 
 import com.coomia.flink.tugraph.TuGraphSinkOptions;
 import com.coomia.flink.tugraph.TuGraphSinkOptions.OnMissingEndpoint;
+import com.coomia.flink.tugraph.TuGraphSinkOptions.OnMissingLabel;
 import com.coomia.flink.tugraph.client.TuGraphConnection;
+import com.coomia.flink.tugraph.client.TuGraphConnection.BatchWriteResult;
 import com.coomia.flink.tugraph.cypher.CypherStatement;
 import com.coomia.flink.tugraph.cypher.CypherStatementBuilder;
 import com.coomia.flink.tugraph.element.Edge;
@@ -35,6 +37,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -61,6 +64,11 @@ import java.util.concurrent.Future;
  * <p><b>Threading.</b> {@link #write}, {@link #flush} and the processing-time callback all run on
  * the single task thread (Flink's mailbox); the buffer needs no synchronization. Parallel writes use
  * a private pool and the flush blocks until they complete (so flushing still back-pressures).
+ *
+ * <p><b>Failure surfacing.</b> A flush triggered by the batch-interval timer never lets its
+ * exception escape the timer callback (which would fail the task as an uncaught
+ * {@code AsynchronousException}); the failure is recorded and rethrown from the next {@link #write}
+ * or {@link #flush} call on the task thread, so it goes through Flink's regular failure handling.
  *
  * @param <InputT> upstream record type
  */
@@ -94,8 +102,12 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
     private final Counter numRecordsSend;
     private final Counter flushCounter;
     private final Counter edgeSkippedCounter;
+    private final Counter vertexSkippedCounter;
     private final Counter deletedCounter;
     private volatile long lastFlushLatencyMs;
+
+    /** Failure from a timer-triggered flush, rethrown on the task thread by write/flush. */
+    private volatile Exception asyncFlushException;
 
     private boolean closed;
 
@@ -120,6 +132,7 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
         MetricGroup tg = metricGroup.addGroup("tugraph");
         this.flushCounter = tg.counter("flushCount");
         this.edgeSkippedCounter = tg.counter("edgeSkipped");
+        this.vertexSkippedCounter = tg.counter("vertexSkipped");
         this.deletedCounter = tg.counter("deleted");
         tg.gauge("flushLatencyMs", () -> lastFlushLatencyMs);
 
@@ -128,6 +141,7 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
 
     @Override
     public void write(InputT element, Context context) throws IOException, InterruptedException {
+        checkAsyncFlushException();
         GraphElement converted = converter.convert(element);
         if (converted == null) {
             return; // dropped (e.g. the UPDATE_BEFORE half of a changelog update)
@@ -140,7 +154,16 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
 
     @Override
     public void flush(boolean endOfInput) throws IOException, InterruptedException {
+        checkAsyncFlushException();
         flushBuffer();
+    }
+
+    /** Rethrow a recorded timer-flush failure on the task thread (Flink's regular failure path). */
+    private void checkAsyncFlushException() throws IOException {
+        Exception e = asyncFlushException;
+        if (e != null) {
+            throw new IOException("A TuGraph flush triggered by the batch-interval timer failed", e);
+        }
     }
 
     /** Turn the buffer into ordered upsert/delete statements and write them. */
@@ -151,6 +174,7 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
         long startNanos = System.nanoTime();
 
         List<CypherStatement> statements = new ArrayList<>(buffer.size());
+        BitSet vertexStatements = new BitSet(buffer.size());
         int vertexUpserts = 0;
         int edgeUpserts = 0;
         int deletes = 0;
@@ -158,6 +182,7 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
             GraphElement e = op.element;
             if (e instanceof Vertex) {
                 Vertex v = (Vertex) e;
+                int from = statements.size();
                 if (op.delete) {
                     statements.addAll(cypherBuilder.buildVertexDelete(v.label(), v.primaryKey(), List.of(v)));
                     deletes++;
@@ -165,6 +190,7 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
                     statements.addAll(cypherBuilder.buildVertexUpsert(v.label(), v.primaryKey(), List.of(v)));
                     vertexUpserts++;
                 }
+                vertexStatements.set(from, statements.size());
             } else if (e instanceof Edge) {
                 Edge ed = (Edge) e;
                 if (op.delete) {
@@ -181,59 +207,87 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
             }
         }
 
+        // With vertex.on-missing-label=skip, vertex statements (upserts and deletes) hitting a
+        // missing-label schema error are skipped record-level instead of failing the flush. Edge
+        // statements are never label-skipped; their endpoint handling stays with on-missing-endpoint.
+        boolean[] skippableOnMissingLabel = null;
+        if (options.onMissingLabel() == OnMissingLabel.SKIP && !vertexStatements.isEmpty()) {
+            skippableOnMissingLabel = new boolean[statements.size()];
+            for (int i = vertexStatements.nextSetBit(0); i >= 0; i = vertexStatements.nextSetBit(i + 1)) {
+                skippableOnMissingLabel[i] = true;
+            }
+        }
+
         // Safe to parallelize only when the flush is a single upsert kind with no ordering / endpoint
         // dependencies: vertices-only or edges-only, and no deletes.
         // Parallelize only pure vertex-upsert flushes - avoids edge / endpoint write races
         // (e.g. on-missing-endpoint=create MERGEing the same endpoint from two threads).
         boolean parallel = deletes == 0 && edgeUpserts == 0 && statements.size() > 1;
-        long writtenEdges = parallel
-                ? writeConcurrently(statements)
-                : connection.writeBatch(statements);
+        BatchWriteResult result = parallel
+                ? writeConcurrently(statements, skippableOnMissingLabel)
+                : connection.writeBatch(statements, skippableOnMissingLabel);
+        long writtenEdges = result.written();
 
-        long skipped = 0;
+        long labelSkipped = result.skippedMissingLabel();
+        if (labelSkipped > 0) {
+            vertexSkippedCounter.inc(labelSkipped);
+            LOG.warn("Skipped {} vertex op(s) whose label is missing from the graph schema"
+                    + " (vertex.on-missing-label=skip)", labelSkipped);
+        }
+
+        long endpointSkipped = 0;
         if (edgeUpserts > 0 && writtenEdges != TuGraphConnection.NO_WRITTEN_COUNT) {
-            skipped = edgeUpserts - writtenEdges;
-            if (skipped > 0) {
+            endpointSkipped = edgeUpserts - writtenEdges;
+            if (endpointSkipped > 0) {
                 if (options.onMissingEndpoint() == OnMissingEndpoint.FAIL) {
-                    throw new IOException(skipped + " edge(s) could not be written because an endpoint"
+                    throw new IOException(endpointSkipped + " edge(s) could not be written because an endpoint"
                             + " vertex was missing (edge.on-missing-endpoint=fail)");
                 }
-                edgeSkippedCounter.inc(skipped);
-                LOG.warn("Skipped {} edge(s) due to missing endpoint vertices", skipped);
+                edgeSkippedCounter.inc(endpointSkipped);
+                LOG.warn("Skipped {} edge(s) due to missing endpoint vertices", endpointSkipped);
             }
         }
 
         int total = buffer.size();
         buffer.clear();
 
-        numRecordsSend.inc(total - skipped);
+        numRecordsSend.inc(total - endpointSkipped - labelSkipped);
         if (deletes > 0) {
             deletedCounter.inc(deletes);
         }
         flushCounter.inc();
         lastFlushLatencyMs = (System.nanoTime() - startNanos) / 1_000_000L;
-        LOG.debug("Flushed {} ops ({} deletes, {} edges skipped, parallel={}) to TuGraph in {} ms",
-                total, deletes, skipped, parallel, lastFlushLatencyMs);
+        LOG.debug("Flushed {} ops ({} deletes, {} edges skipped, {} vertices skipped, parallel={})"
+                        + " to TuGraph in {} ms",
+                total, deletes, endpointSkipped, labelSkipped, parallel, lastFlushLatencyMs);
     }
 
     /**
      * Write order-independent statements concurrently over the connection pool. Each statement is an
      * independent auto-commit query; the connection is thread-safe across sessions.
      *
-     * @return the summed edge written-count, or {@link TuGraphConnection#NO_WRITTEN_COUNT}
+     * @return the aggregated written / label-skipped counts across all statements
      */
-    private long writeConcurrently(List<CypherStatement> statements) throws IOException {
-        List<Future<Long>> futures = new ArrayList<>(statements.size());
-        for (CypherStatement statement : statements) {
-            futures.add(writeExecutor.submit(() -> connection.writeBatch(statement)));
+    private BatchWriteResult writeConcurrently(List<CypherStatement> statements,
+                                               boolean[] skippableOnMissingLabel) throws IOException {
+        List<Future<BatchWriteResult>> futures = new ArrayList<>(statements.size());
+        for (int i = 0; i < statements.size(); i++) {
+            List<CypherStatement> single = List.of(statements.get(i));
+            boolean[] singleSkippable = skippableOnMissingLabel == null
+                    ? null
+                    : new boolean[] {skippableOnMissingLabel[i]};
+            futures.add(writeExecutor.submit(() -> connection.writeBatch(single, singleSkippable)));
         }
         long written = TuGraphConnection.NO_WRITTEN_COUNT;
+        int skipped = 0;
         try {
-            for (Future<Long> future : futures) {
-                long w = future.get();
+            for (Future<BatchWriteResult> future : futures) {
+                BatchWriteResult r = future.get();
+                long w = r.written();
                 if (w != TuGraphConnection.NO_WRITTEN_COUNT) {
                     written = (written == TuGraphConnection.NO_WRITTEN_COUNT ? 0L : written) + w;
                 }
+                skipped += r.skippedMissingLabel();
             }
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
@@ -245,7 +299,7 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
             }
             throw new IOException("Concurrent TuGraph write failed", cause);
         }
-        return written;
+        return new BatchWriteResult(written, skipped);
     }
 
     /** Register the next processing-time flush timer if time-based flushing is enabled. */
@@ -255,10 +309,22 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
         }
         long triggerAt = timeService.getCurrentProcessingTime() + options.batchIntervalMs();
         timeService.registerTimer(triggerAt, timestamp -> {
-            if (!closed) {
-                flushBuffer();
-                scheduleNextTimer();
+            if (closed) {
+                return;
             }
+            // Never let the flush fail the timer callback (an uncaught AsynchronousException that
+            // bypasses regular error handling); record it and rethrow from write()/flush() on the
+            // task thread. The buffer is only cleared on success, so no data is lost.
+            try {
+                if (asyncFlushException == null) {
+                    flushBuffer();
+                }
+            } catch (Exception e) {
+                asyncFlushException = e;
+                LOG.error("Timer-triggered TuGraph flush failed; failing the task on the next"
+                        + " write/flush", e);
+            }
+            scheduleNextTimer();
         });
     }
 
