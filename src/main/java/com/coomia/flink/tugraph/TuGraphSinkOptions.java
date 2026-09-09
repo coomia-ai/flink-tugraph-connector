@@ -66,6 +66,9 @@ public final class TuGraphSinkOptions implements Serializable {
     private final int batchSize;
     private final long batchIntervalMs;
     private final int maxRetries;
+    private final long retryBudgetMs;
+    private final long retryInitialBackoffMs;
+    private final long retryMaxBackoffMs;
 
     // ---- Edge behaviour ----
     private final OnMissingEndpoint onMissingEndpoint;
@@ -84,6 +87,9 @@ public final class TuGraphSinkOptions implements Serializable {
         this.batchSize = b.batchSize;
         this.batchIntervalMs = b.batchIntervalMs;
         this.maxRetries = b.maxRetries;
+        this.retryBudgetMs = b.retryBudgetMs;
+        this.retryInitialBackoffMs = b.retryInitialBackoffMs;
+        this.retryMaxBackoffMs = b.retryMaxBackoffMs;
         this.onMissingEndpoint = b.onMissingEndpoint;
         this.edgeMergeKeys = b.edgeMergeKeys;
         this.onMissingLabel = b.onMissingLabel;
@@ -125,6 +131,22 @@ public final class TuGraphSinkOptions implements Serializable {
         return maxRetries;
     }
 
+    /**
+     * Total wall-clock budget for retrying a transient connection failure. A value of {@code 0}
+     * keeps the legacy {@link #maxRetries()} attempt-count policy.
+     */
+    public long retryBudgetMs() {
+        return retryBudgetMs;
+    }
+
+    public long retryInitialBackoffMs() {
+        return retryInitialBackoffMs;
+    }
+
+    public long retryMaxBackoffMs() {
+        return retryMaxBackoffMs;
+    }
+
     public OnMissingEndpoint onMissingEndpoint() {
         return onMissingEndpoint;
     }
@@ -151,6 +173,9 @@ public final class TuGraphSinkOptions implements Serializable {
                 + ", batchSize=" + batchSize
                 + ", batchIntervalMs=" + batchIntervalMs
                 + ", maxRetries=" + maxRetries
+                + ", retryBudgetMs=" + retryBudgetMs
+                + ", retryInitialBackoffMs=" + retryInitialBackoffMs
+                + ", retryMaxBackoffMs=" + retryMaxBackoffMs
                 + ", connectionTimeoutMs=" + connectionTimeoutMs
                 + ", maxConnectionPoolSize=" + maxConnectionPoolSize
                 + ", onMissingEndpoint=" + onMissingEndpoint
@@ -169,6 +194,9 @@ public final class TuGraphSinkOptions implements Serializable {
         private int batchSize = 500;
         private long batchIntervalMs = 1_000L;
         private int maxRetries = 3;
+        private long retryBudgetMs;
+        private long retryInitialBackoffMs = 1_000L;
+        private long retryMaxBackoffMs = 10_000L;
         private OnMissingEndpoint onMissingEndpoint = OnMissingEndpoint.SKIP;
         private List<String> edgeMergeKeys = Collections.emptyList();
         private OnMissingLabel onMissingLabel = OnMissingLabel.FAIL;
@@ -240,6 +268,32 @@ public final class TuGraphSinkOptions implements Serializable {
             return this;
         }
 
+        /**
+         * Total wall-clock retry budget for transient connection failures. {@code 0} (default)
+         * disables budget mode and preserves the legacy {@link #maxRetries()} policy.
+         */
+        public Builder retryBudgetMs(long retryBudgetMs) {
+            this.retryBudgetMs = retryBudgetMs;
+            return this;
+        }
+
+        public Builder retryBudget(Duration retryBudget) {
+            this.retryBudgetMs = Objects.requireNonNull(retryBudget, "retryBudget").toMillis();
+            return this;
+        }
+
+        /** Initial exponential retry delay. Used when {@link #retryBudgetMs(long)} is enabled. */
+        public Builder retryInitialBackoffMs(long retryInitialBackoffMs) {
+            this.retryInitialBackoffMs = retryInitialBackoffMs;
+            return this;
+        }
+
+        /** Maximum exponential retry delay. Used when {@link #retryBudgetMs(long)} is enabled. */
+        public Builder retryMaxBackoffMs(long retryMaxBackoffMs) {
+            this.retryMaxBackoffMs = retryMaxBackoffMs;
+            return this;
+        }
+
         public Builder onMissingEndpoint(OnMissingEndpoint onMissingEndpoint) {
             this.onMissingEndpoint = onMissingEndpoint;
             return this;
@@ -268,6 +322,11 @@ public final class TuGraphSinkOptions implements Serializable {
             requireNonBlank(graph, "graph");
             checkArgument(batchSize > 0, "batchSize must be > 0");
             checkArgument(maxRetries >= 0, "maxRetries must be >= 0");
+            checkArgument(retryBudgetMs >= 0, "retryBudgetMs must be >= 0");
+            checkArgument(retryInitialBackoffMs > 0, "retryInitialBackoffMs must be > 0");
+            checkArgument(retryMaxBackoffMs > 0, "retryMaxBackoffMs must be > 0");
+            checkArgument(retryMaxBackoffMs >= retryInitialBackoffMs,
+                    "retryMaxBackoffMs must be >= retryInitialBackoffMs");
             checkArgument(connectionTimeoutMs > 0, "connectionTimeoutMs must be > 0");
             checkArgument(maxConnectionPoolSize > 0, "maxConnectionPoolSize must be > 0");
             return new TuGraphSinkOptions(this);

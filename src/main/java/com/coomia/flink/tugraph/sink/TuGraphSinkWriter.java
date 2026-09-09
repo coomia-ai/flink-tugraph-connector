@@ -39,10 +39,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 
 /**
  * Buffers graph change operations and flushes them to TuGraph as idempotent {@code MERGE} (upsert)
@@ -65,10 +63,10 @@ import java.util.concurrent.Future;
  * the single task thread (Flink's mailbox); the buffer needs no synchronization. Parallel writes use
  * a private pool and the flush blocks until they complete (so flushing still back-pressures).
  *
- * <p><b>Failure surfacing.</b> A flush triggered by the batch-interval timer never lets its
- * exception escape the timer callback (which would fail the task as an uncaught
- * {@code AsynchronousException}); the failure is recorded and rethrown from the next {@link #write}
- * or {@link #flush} call on the task thread, so it goes through Flink's regular failure handling.
+ * <p><b>Failure recovery.</b> A timer-triggered flush keeps the buffer on failure. Transient
+ * connection failures are retried by the next timer or synchronously before the next
+ * {@link #write}/{@link #flush}; a successful replay clears the recorded failure. Deterministic
+ * failures are surfaced on the task thread so they go through Flink's regular failure handling.
  *
  * @param <InputT> upstream record type
  */
@@ -104,10 +102,13 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
     private final Counter edgeSkippedCounter;
     private final Counter vertexSkippedCounter;
     private final Counter deletedCounter;
+    private final Counter retryAttemptsCounter;
+    private final Counter asyncFlushFailuresCounter;
     private volatile long lastFlushLatencyMs;
 
     /** Failure from a timer-triggered flush, rethrown on the task thread by write/flush. */
     private volatile Exception asyncFlushException;
+    private volatile long asyncFlushFailureStartedNanos;
 
     private boolean closed;
 
@@ -116,14 +117,21 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
                              CypherStatementBuilder cypherBuilder,
                              SinkWriterMetricGroup metricGroup,
                              ProcessingTimeService timeService) {
+        this(options, converter, cypherBuilder, metricGroup, timeService, null);
+    }
+
+    /** Test seam for supplying a deterministic connection implementation. */
+    TuGraphSinkWriter(TuGraphSinkOptions options,
+                      ElementConverter<InputT> converter,
+                      CypherStatementBuilder cypherBuilder,
+                      SinkWriterMetricGroup metricGroup,
+                      ProcessingTimeService timeService,
+                      TuGraphConnection suppliedConnection) {
         this.options = options;
         this.converter = converter;
         this.cypherBuilder = cypherBuilder;
         this.timeService = timeService;
         this.buffer = new ArrayList<>(options.batchSize());
-
-        this.connection = new TuGraphConnection(options);
-        this.connection.open();
 
         int threads = Math.min(Math.max(1, options.maxConnectionPoolSize()), MAX_WRITE_THREADS);
         this.writeExecutor = Executors.newFixedThreadPool(threads);
@@ -134,7 +142,14 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
         this.edgeSkippedCounter = tg.counter("edgeSkipped");
         this.vertexSkippedCounter = tg.counter("vertexSkipped");
         this.deletedCounter = tg.counter("deleted");
+        this.retryAttemptsCounter = tg.counter("retryAttempts");
+        this.asyncFlushFailuresCounter = tg.counter("asyncFlushFailures");
         tg.gauge("flushLatencyMs", () -> lastFlushLatencyMs);
+
+        this.connection = suppliedConnection != null
+                ? suppliedConnection
+                : new TuGraphConnection(options, retryAttemptsCounter::inc);
+        this.connection.open();
 
         scheduleNextTimer();
     }
@@ -158,17 +173,24 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
         flushBuffer();
     }
 
-    /** Rethrow a recorded timer-flush failure on the task thread (Flink's regular failure path). */
+    /** Recover a transient timer failure, or surface a deterministic failure on the task thread. */
     private void checkAsyncFlushException() throws IOException {
         Exception e = asyncFlushException;
-        if (e != null) {
+        if (e == null) {
+            return;
+        }
+        if (!TuGraphConnection.isRetryableFailure(e)) {
             throw new IOException("A TuGraph flush triggered by the batch-interval timer failed", e);
         }
+        // The failed timer left its records in the buffer. Replay those records before consuming
+        // the caller's new element or acknowledging a checkpoint flush.
+        flushBuffer();
     }
 
     /** Turn the buffer into ordered upsert/delete statements and write them. */
     private void flushBuffer() throws IOException {
         if (buffer.isEmpty()) {
+            clearAsyncFlushFailure();
             return;
         }
         long startNanos = System.nanoTime();
@@ -224,7 +246,8 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
         // (e.g. on-missing-endpoint=create MERGEing the same endpoint from two threads).
         boolean parallel = deletes == 0 && edgeUpserts == 0 && statements.size() > 1;
         BatchWriteResult result = parallel
-                ? writeConcurrently(statements, skippableOnMissingLabel)
+                ? connection.writeBatchConcurrently(
+                        statements, skippableOnMissingLabel, writeExecutor)
                 : connection.writeBatch(statements, skippableOnMissingLabel);
         long writtenEdges = result.written();
 
@@ -250,6 +273,7 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
 
         int total = buffer.size();
         buffer.clear();
+        clearAsyncFlushFailure();
 
         numRecordsSend.inc(total - endpointSkipped - labelSkipped);
         if (deletes > 0) {
@@ -262,46 +286,6 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
                 total, deletes, endpointSkipped, labelSkipped, parallel, lastFlushLatencyMs);
     }
 
-    /**
-     * Write order-independent statements concurrently over the connection pool. Each statement is an
-     * independent auto-commit query; the connection is thread-safe across sessions.
-     *
-     * @return the aggregated written / label-skipped counts across all statements
-     */
-    private BatchWriteResult writeConcurrently(List<CypherStatement> statements,
-                                               boolean[] skippableOnMissingLabel) throws IOException {
-        List<Future<BatchWriteResult>> futures = new ArrayList<>(statements.size());
-        for (int i = 0; i < statements.size(); i++) {
-            List<CypherStatement> single = List.of(statements.get(i));
-            boolean[] singleSkippable = skippableOnMissingLabel == null
-                    ? null
-                    : new boolean[] {skippableOnMissingLabel[i]};
-            futures.add(writeExecutor.submit(() -> connection.writeBatch(single, singleSkippable)));
-        }
-        long written = TuGraphConnection.NO_WRITTEN_COUNT;
-        int skipped = 0;
-        try {
-            for (Future<BatchWriteResult> future : futures) {
-                BatchWriteResult r = future.get();
-                long w = r.written();
-                if (w != TuGraphConnection.NO_WRITTEN_COUNT) {
-                    written = (written == TuGraphConnection.NO_WRITTEN_COUNT ? 0L : written) + w;
-                }
-                skipped += r.skippedMissingLabel();
-            }
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            throw new IOException("Interrupted while writing a TuGraph batch concurrently", ie);
-        } catch (ExecutionException ee) {
-            Throwable cause = ee.getCause();
-            if (cause instanceof RuntimeException) {
-                throw (RuntimeException) cause; // propagate driver exception to trigger Flink restart
-            }
-            throw new IOException("Concurrent TuGraph write failed", cause);
-        }
-        return new BatchWriteResult(written, skipped);
-    }
-
     /** Register the next processing-time flush timer if time-based flushing is enabled. */
     private void scheduleNextTimer() {
         if (options.batchIntervalMs() <= 0 || closed) {
@@ -312,20 +296,45 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
             if (closed) {
                 return;
             }
-            // Never let the flush fail the timer callback (an uncaught AsynchronousException that
-            // bypasses regular error handling); record it and rethrow from write()/flush() on the
-            // task thread. The buffer is only cleared on success, so no data is lost.
+            // Never leak an exception from the timer callback. A transient failure remains
+            // recoverable by this timer or the next task-thread write/flush; a deterministic error
+            // is surfaced by the next task-thread write/flush.
             try {
-                if (asyncFlushException == null) {
+                Exception pending = asyncFlushException;
+                if (pending == null || TuGraphConnection.isRetryableFailure(pending)) {
                     flushBuffer();
                 }
             } catch (Exception e) {
-                asyncFlushException = e;
-                LOG.error("Timer-triggered TuGraph flush failed; failing the task on the next"
-                        + " write/flush", e);
+                recordAsyncFlushFailure(e);
             }
             scheduleNextTimer();
         });
+    }
+
+    private void recordAsyncFlushFailure(Exception failure) {
+        if (asyncFlushException == null) {
+            asyncFlushFailureStartedNanos = System.nanoTime();
+        }
+        asyncFlushException = failure;
+        asyncFlushFailuresCounter.inc();
+        if (TuGraphConnection.isRetryableFailure(failure)) {
+            LOG.error("Timer-triggered TuGraph flush exhausted its retry policy; retaining {}"
+                    + " buffered op(s) for recovery", buffer.size(), failure);
+        } else {
+            LOG.error("Timer-triggered TuGraph flush failed with a non-retryable error; failing"
+                    + " the task on the next write/flush", failure);
+        }
+    }
+
+    private void clearAsyncFlushFailure() {
+        if (asyncFlushException == null) {
+            return;
+        }
+        long failedForMs = Math.max(0L,
+                (System.nanoTime() - asyncFlushFailureStartedNanos) / 1_000_000L);
+        asyncFlushException = null;
+        asyncFlushFailureStartedNanos = 0L;
+        LOG.info("TuGraph timer flush recovered after {} ms", failedForMs);
     }
 
     @Override
@@ -335,6 +344,7 @@ public class TuGraphSinkWriter<InputT> implements SinkWriter<InputT> {
         }
         closed = true;
         try {
+            checkAsyncFlushException();
             flushBuffer();
         } finally {
             writeExecutor.shutdown();

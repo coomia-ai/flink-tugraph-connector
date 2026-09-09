@@ -141,7 +141,24 @@ public final class TuGraphConnectorOptions {
 
     public static final ConfigOption<Integer> SINK_MAX_RETRIES = ConfigOptions.key("sink.max.retries")
             .intType().defaultValue(3)
-            .withDescription("Number of retries for transient write failures.");
+            .withDescription("Legacy number of retries for transient write failures; used when "
+                    + "sink.retry.budget.ms is 0.");
+
+    public static final ConfigOption<Duration> SINK_RETRY_BUDGET =
+            ConfigOptions.key("sink.retry.budget.ms")
+                    .durationType().defaultValue(Duration.ZERO)
+                    .withDescription("Total wall-clock budget for transient connection retries; "
+                            + "0 keeps the legacy sink.max.retries policy.");
+
+    public static final ConfigOption<Duration> SINK_RETRY_INITIAL_BACKOFF =
+            ConfigOptions.key("sink.retry.initial-backoff.ms")
+                    .durationType().defaultValue(Duration.ofSeconds(1))
+                    .withDescription("Initial exponential backoff when retry budget mode is enabled.");
+
+    public static final ConfigOption<Duration> SINK_RETRY_MAX_BACKOFF =
+            ConfigOptions.key("sink.retry.max-backoff.ms")
+                    .durationType().defaultValue(Duration.ofSeconds(10))
+                    .withDescription("Maximum exponential backoff when retry budget mode is enabled.");
 
     // ---- Source / Lookup (v0.2) ----
     public static final ConfigOption<Integer> SCAN_FETCH_SIZE = ConfigOptions.key("scan.fetch-size")

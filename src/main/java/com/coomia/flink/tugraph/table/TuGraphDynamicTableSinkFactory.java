@@ -50,6 +50,9 @@ import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.PASSWORD;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.SINK_BATCH_INTERVAL;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.SINK_BATCH_SIZE;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.SINK_MAX_RETRIES;
+import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.SINK_RETRY_BUDGET;
+import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.SINK_RETRY_INITIAL_BACKOFF;
+import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.SINK_RETRY_MAX_BACKOFF;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.URI;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.USERNAME;
 import static com.coomia.flink.tugraph.table.TuGraphConnectorOptions.VERTEX_LABEL;
@@ -100,6 +103,9 @@ public class TuGraphDynamicTableSinkFactory implements DynamicTableSinkFactory {
         options.add(SINK_BATCH_SIZE);
         options.add(SINK_BATCH_INTERVAL);
         options.add(SINK_MAX_RETRIES);
+        options.add(SINK_RETRY_BUDGET);
+        options.add(SINK_RETRY_INITIAL_BACKOFF);
+        options.add(SINK_RETRY_MAX_BACKOFF);
         return options;
     }
 
@@ -116,6 +122,9 @@ public class TuGraphDynamicTableSinkFactory implements DynamicTableSinkFactory {
                 .batchSize(config.get(SINK_BATCH_SIZE))
                 .batchIntervalMs(config.get(SINK_BATCH_INTERVAL).toMillis())
                 .maxRetries(config.get(SINK_MAX_RETRIES))
+                .retryBudget(config.get(SINK_RETRY_BUDGET))
+                .retryInitialBackoffMs(config.get(SINK_RETRY_INITIAL_BACKOFF).toMillis())
+                .retryMaxBackoffMs(config.get(SINK_RETRY_MAX_BACKOFF).toMillis())
                 .connectionTimeoutMs(config.get(CONNECTION_TIMEOUT).toMillis())
                 .maxConnectionPoolSize(config.get(MAX_CONNECTION_POOL_SIZE))
                 .onMissingEndpoint(config.get(EDGE_ON_MISSING_ENDPOINT))

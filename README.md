@@ -103,7 +103,7 @@ on Java 21.
 
 ```kotlin
 dependencies {
-    implementation("com.coomia.flink:flink-tugraph-connector:0.2.0")
+    implementation("com.coomia.flink:flink-tugraph-connector:0.3.0")
 }
 ```
 
@@ -146,7 +146,9 @@ vertices.sinkTo(TuGraphSink.<Vertex>builder()
         .graph("default")
         .batchSize(500)
         .batchIntervalMs(1000)
-        .maxRetries(3)
+        .retryBudgetMs(90_000)
+        .retryInitialBackoffMs(1_000)
+        .retryMaxBackoffMs(10_000)
         .build());
 ```
 
@@ -323,7 +325,10 @@ columns map to the endpoint vertices.
 | `edge.on-missing-endpoint` | | `skip` | `skip` (record metric), `fail`, or `create` (MERGE missing endpoint) |
 | `sink.batch.size` | | `500` | Flush threshold (rows) |
 | `sink.batch.interval.ms` | | `1000` | Flush threshold (time); `0` disables |
-| `sink.max.retries` | | `3` | Transient-failure retries |
+| `sink.max.retries` | | `3` | Legacy transient-failure retry count; used when retry budget is `0` |
+| `sink.retry.budget.ms` | | `0` | Total transient-failure retry budget; `0` keeps legacy count mode |
+| `sink.retry.initial-backoff.ms` | | `1000` | Initial exponential backoff in budget mode |
+| `sink.retry.max-backoff.ms` | | `10000` | Maximum exponential backoff in budget mode |
 | `connection.timeout.ms` | | `15000` | Bolt connection timeout |
 | `max.connection.pool.size` | | `10` | Bolt pool size per subtask |
 | `scan.fetch-size` | | `1000` | Source: vertex scan page size (v0.2) |
@@ -355,6 +360,9 @@ columns map to the endpoint vertices.
   checkpoint replay re-applies them idempotently.
 - **Property semantics:** properties are **fully overwritten** (`SET = latest value`); accumulative
   ("counter") semantics are not supported — pre-aggregate upstream if you need them.
+- **Transient outages:** set `sink.retry.budget.ms` (for example `90000`) to absorb Bolt connection,
+  session-expiry and transient server failures without restarting the task. Timer-flush failures
+  retain their buffer and recover on a later timer or the next task-thread write/checkpoint flush.
 
 ## Metrics
 
@@ -366,6 +374,8 @@ columns map to the endpoint vertices.
 | `tugraph.edgeSkipped` | counter | edges skipped due to missing endpoints |
 | `tugraph.vertexSkipped` | counter | vertices skipped due to a missing vertex label (`vertex.on-missing-label = skip`) |
 | `tugraph.deleted` | counter | elements deleted (changelog DELETE) |
+| `tugraph.retryAttempts` | counter | transient-failure retry attempts |
+| `tugraph.asyncFlushFailures` | counter | timer flushes that exhausted their retry policy |
 
 ## Architecture
 
@@ -421,7 +431,7 @@ Runnable examples live under
 - **v0.2** — bounded `ScanTableSource` (vertex ✅ + edge ✅), `LookupTableSource` with `LookupCache`
   ✅, projection ✅ and filter ✅ (vertex) push-down. Nested ARRAY/MAP/ROW are not supported
   (TuGraph stores scalar properties).
-- **v0.3 (not planned)** — TuGraph has no native change-data-capture (no binlog / subscription), so
+- **Future (not planned)** — TuGraph has no native change-data-capture (no binlog / subscription), so
   an unbounded / CDC source over Bolt is not feasible. Capture changes with an external CDC source
   upstream (e.g. Flink CDC / Debezium) and write them through this sink's changelog support.
 
@@ -527,7 +537,9 @@ vertices.sinkTo(TuGraphSink.<Vertex>builder()
         .graph("default")
         .batchSize(500)
         .batchIntervalMs(1000)
-        .maxRetries(3)
+        .retryBudgetMs(90_000)
+        .retryInitialBackoffMs(1_000)
+        .retryMaxBackoffMs(10_000)
         .build());
 ```
 
@@ -578,6 +590,8 @@ projection。**不支持嵌套 ARRAY/MAP/ROW**:TuGraph 无通用 list/map/JSON �
 - **幂等**：全部走 `MERGE`（点按主键、边按端点 + 边 label），重放只更新不重复 —— 结果图**业务可见
   exactly-once**。
 - **属性语义**：属性为**全量覆盖**（`SET = 最新值`），不支持累加 / 计数语义，累加场景请在上游预聚合。
+- **瞬时故障**：设置 `sink.retry.budget.ms`（例如 `90000`）可在总预算内吸收 Bolt 连接失败、会话过期和
+  服务端瞬时错误。定时 flush 失败会保留 buffer，由后续定时器或下一次 write/checkpoint flush 恢复。
 
 ### 测试
 
@@ -593,7 +607,7 @@ $env:TUGRAPH_IT=1; ./gradlew test   # 集成测试（需 Docker + 可用 TuGraph
 
 - **v0.2**：有界 `ScanTableSource`（点 ✅ + 边 ✅）、带缓存的维表 `LookupTableSource` ✅、projection ✅
   与 filter ✅（点）下推。TuGraph 仅存标量属性，不支持嵌套 ARRAY/MAP/ROW。
-- **v0.3（暂不做）**：TuGraph 无原生变更订阅 / binlog，Bolt 上无法实现无界 / CDC Source；如需 CDC，在
+- **后续（暂不做）**：TuGraph 无原生变更订阅 / binlog，Bolt 上无法实现无界 / CDC Source；如需 CDC，在
   上游用外部 CDC 源（Flink CDC / Debezium）捕获变更，再经本 Sink 的 changelog 能力入图。
 
 ### 贡献与许可

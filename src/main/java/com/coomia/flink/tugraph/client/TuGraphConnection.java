@@ -40,6 +40,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -50,10 +54,11 @@ import java.util.concurrent.TimeUnit;
  * teardown — never per batch.
  *
  * <p>A whole flush group is written by {@link #writeBatch(List)} in one explicit (unmanaged)
- * transaction, so this class fully controls retry behaviour: transient failures retry the whole
- * group with exponential backoff up to {@link TuGraphSinkOptions#maxRetries()}, after which the
- * exception propagates and Flink restarts the job from the last checkpoint (idempotent {@code MERGE}
- * absorbs the replay).
+ * operation. This class fully controls retry behaviour: transient failures retry the whole group
+ * with exponential backoff, either within {@link TuGraphSinkOptions#retryBudgetMs()} or (for
+ * compatibility) up to {@link TuGraphSinkOptions#maxRetries()}. The last driver exception is
+ * propagated after exhaustion so Flink can restart from the last checkpoint; idempotent
+ * {@code MERGE} absorbs the replay.
  */
 public class TuGraphConnection implements AutoCloseable, Serializable {
 
@@ -90,24 +95,48 @@ public class TuGraphConnection implements AutoCloseable, Serializable {
 
     private final TuGraphSinkOptions options;
 
+    /** Runtime-only listener used by the sink writer to expose retry attempts as a metric. */
+    private transient Runnable retryListener;
+
+    private transient RetryPolicy retryPolicy;
+
     /** Lazily built, then reused; {@code transient} because driver is not serializable. */
     private transient volatile Driver driver;
 
     public TuGraphConnection(TuGraphSinkOptions options) {
+        this(options, null);
+    }
+
+    public TuGraphConnection(TuGraphSinkOptions options, Runnable retryListener) {
         this.options = options;
+        this.retryListener = retryListener;
+        this.retryPolicy = new RetryPolicy(options, retryListener);
     }
 
     /** Open the driver (idempotent). Safe to call once during writer initialization. */
     public synchronized void open() {
         if (driver == null) {
-            Config config = Config.builder()
-                    .withMaxConnectionPoolSize(options.maxConnectionPoolSize())
-                    .withConnectionTimeout(options.connectionTimeoutMs(), TimeUnit.MILLISECONDS)
-                    .withConnectionAcquisitionTimeout(
-                            Math.max(options.connectionTimeoutMs(), 60_000L), TimeUnit.MILLISECONDS)
-                    .build();
-            driver = GraphDatabase.driver(
-                    options.uri(), AuthTokens.basic(options.username(), options.password()), config);
+            if (options.retryBudgetMs() > 0) {
+                retryPolicy().execute("connection open", () -> {
+                    Driver candidate = newDriver();
+                    try {
+                        candidate.verifyConnectivity();
+                        driver = candidate;
+                        return null;
+                    } catch (RuntimeException failure) {
+                        try {
+                            candidate.close();
+                        } catch (RuntimeException closeFailure) {
+                            failure.addSuppressed(closeFailure);
+                        }
+                        throw failure;
+                    }
+                });
+            } else {
+                // Preserve 0.2 behaviour when budget mode is disabled: driver creation is lazy and
+                // the first query performs the actual network connection.
+                driver = newDriver();
+            }
             LOG.info("Opened TuGraph Bolt driver to {} (graph={})", options.uri(), options.graph());
         }
     }
@@ -115,7 +144,14 @@ public class TuGraphConnection implements AutoCloseable, Serializable {
     /** Fail fast if the server is unreachable or credentials are wrong. */
     public void verifyConnectivity() {
         ensureOpen();
-        driver.verifyConnectivity();
+        if (options.retryBudgetMs() > 0) {
+            retryPolicy().execute("connectivity verification", () -> {
+                driver.verifyConnectivity();
+                return null;
+            });
+        } else {
+            driver.verifyConnectivity();
+        }
     }
 
     /** Convenience for a single statement; see {@link #writeBatch(List)}. */
@@ -124,10 +160,13 @@ public class TuGraphConnection implements AutoCloseable, Serializable {
     }
 
     /**
-     * Execute a group of statements in a single transaction, retrying transient errors with
-     * exponential backoff.
+     * Executes a group of statements sequentially using auto-commit sessions.
      *
-     * @param statements the parameterized statements (run in order, atomically)
+     * <p>The retry policy applies to the complete batch. A retry therefore replays the batch from
+     * its first statement; callers should use idempotent Cypher (for example, {@code MERGE}) when
+     * transient-failure recovery is enabled.
+     *
+     * @param statements the parameterized statements, run in order
      * @return the total number of edges written across statements that report it (see
      *         {@link CypherStatementBuilder#WRITTEN_COUNT_FIELD}); {@link #NO_WRITTEN_COUNT} when no
      *         statement returns such a field (e.g. vertex upserts)
@@ -153,47 +192,27 @@ public class TuGraphConnection implements AutoCloseable, Serializable {
             return new BatchWriteResult(NO_WRITTEN_COUNT, 0);
         }
         ensureOpen();
-        int attempt = 0;
-        while (true) {
-            try (Session session = driver.session(SessionConfig.forDatabase(options.graph()))) {
-                long written = NO_WRITTEN_COUNT;
-                int skipped = 0;
-                for (int i = 0; i < statements.size(); i++) {
-                    CypherStatement stmt = statements.get(i);
-                    long w;
-                    try {
-                        // TuGraph supports auto-commit only (no explicit/managed transactions over
-                        // Bolt), so each statement commits on its own; idempotent MERGE keeps
-                        // replays safe.
-                        w = readWrittenCount(session.run(stmt.cypher(), stmt.parameters()));
-                    } catch (Neo4jException ex) {
-                        if (skippableOnMissingLabel != null && skippableOnMissingLabel[i]
-                                && isMissingVertexLabel(ex)) {
-                            skipped++;
-                            LOG.debug("Skipping statement for a missing vertex label: {}",
-                                    ex.getMessage());
-                            continue;
-                        }
-                        throw ex; // transient subtypes fall through to the retry handler below
-                    }
-                    if (w != NO_WRITTEN_COUNT) {
-                        written = (written == NO_WRITTEN_COUNT ? 0L : written) + w;
-                    }
-                }
-                return new BatchWriteResult(written, skipped);
-            } catch (TransientException | ServiceUnavailableException | SessionExpiredException ex) {
-                if (attempt >= options.maxRetries()) {
-                    LOG.error("TuGraph write failed after {} retries; propagating to trigger restart",
-                            options.maxRetries(), ex);
-                    throw ex;
-                }
-                long backoffMs = backoffMillis(attempt);
-                LOG.warn("Transient TuGraph write failure (attempt {}/{}), retrying in {} ms: {}",
-                        attempt + 1, options.maxRetries(), backoffMs, ex.getMessage());
-                sleep(backoffMs);
-                attempt++;
-            }
+        return retryPolicy().execute("write", () -> writeBatchOnce(statements, skippableOnMissingLabel));
+    }
+
+    /**
+     * Executes independent statements concurrently. Budget mode applies one shared deadline to the
+     * complete flush and waits for all tasks in an attempt before replay; compatibility mode keeps
+     * the 0.2 per-statement {@link TuGraphSinkOptions#maxRetries()} behaviour.
+     */
+    public BatchWriteResult writeBatchConcurrently(List<CypherStatement> statements,
+                                                    boolean[] skippableOnMissingLabel,
+                                                    ExecutorService executor) {
+        if (statements == null || statements.isEmpty()) {
+            return new BatchWriteResult(NO_WRITTEN_COUNT, 0);
         }
+        ensureOpen();
+        if (options.retryBudgetMs() == 0) {
+            return writeBatchConcurrentlyLegacy(
+                    statements, skippableOnMissingLabel, executor);
+        }
+        return retryPolicy().execute("parallel write",
+                () -> writeBatchConcurrentlyOnce(statements, skippableOnMissingLabel, executor));
     }
 
     /**
@@ -205,26 +224,15 @@ public class TuGraphConnection implements AutoCloseable, Serializable {
      */
     public List<Map<String, Object>> read(CypherStatement stmt) {
         ensureOpen();
-        int attempt = 0;
-        while (true) {
+        return retryPolicy().execute("read", () -> {
             try (Session session = driver.session(SessionConfig.forDatabase(options.graph()))) {
                 List<Map<String, Object>> rows = new ArrayList<>();
                 for (Record record : session.run(stmt.cypher(), stmt.parameters()).list()) {
                     rows.add(record.asMap());
                 }
                 return rows;
-            } catch (TransientException | ServiceUnavailableException | SessionExpiredException ex) {
-                if (attempt >= options.maxRetries()) {
-                    LOG.error("TuGraph read failed after {} retries", options.maxRetries(), ex);
-                    throw ex;
-                }
-                long backoffMs = backoffMillis(attempt);
-                LOG.warn("Transient TuGraph read failure (attempt {}/{}), retrying in {} ms: {}",
-                        attempt + 1, options.maxRetries(), backoffMs, ex.getMessage());
-                sleep(backoffMs);
-                attempt++;
             }
-        }
+        });
     }
     /**
      * Whether the failure is TuGraph rejecting a statement because its vertex label is not defined
@@ -254,19 +262,139 @@ public class TuGraphConnection implements AutoCloseable, Serializable {
         return NO_WRITTEN_COUNT;
     }
 
-    /** Exponential backoff: 200ms, 400ms, 800ms, ... capped at 10s. */
-    private static long backoffMillis(int attempt) {
-        long base = 200L << Math.min(attempt, 6);
-        return Math.min(base, 10_000L);
+    /** Whether {@code failure} or any cause is safe to retry after waiting for TuGraph to recover. */
+    public static boolean isRetryableFailure(Throwable failure) {
+        return RetryPolicy.isRetryable(failure);
     }
 
-    private static void sleep(long millis) {
-        try {
-            Thread.sleep(millis);
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Interrupted while backing off before a TuGraph write retry", ie);
+    private Driver newDriver() {
+        long connectionTimeoutMs = options.connectionTimeoutMs();
+        long acquisitionTimeoutMs = Math.max(connectionTimeoutMs, 60_000L);
+        if (options.retryBudgetMs() > 0) {
+            connectionTimeoutMs = Math.min(connectionTimeoutMs, options.retryBudgetMs());
+            acquisitionTimeoutMs = Math.min(acquisitionTimeoutMs, options.retryBudgetMs());
         }
+        Config config = Config.builder()
+                .withMaxConnectionPoolSize(options.maxConnectionPoolSize())
+                .withConnectionTimeout(connectionTimeoutMs, TimeUnit.MILLISECONDS)
+                .withConnectionAcquisitionTimeout(acquisitionTimeoutMs, TimeUnit.MILLISECONDS)
+                .build();
+        return GraphDatabase.driver(
+                options.uri(), AuthTokens.basic(options.username(), options.password()), config);
+    }
+
+    private BatchWriteResult writeBatchOnce(List<CypherStatement> statements,
+                                            boolean[] skippableOnMissingLabel) {
+        try (Session session = driver.session(SessionConfig.forDatabase(options.graph()))) {
+            long written = NO_WRITTEN_COUNT;
+            int skipped = 0;
+            for (int i = 0; i < statements.size(); i++) {
+                CypherStatement stmt = statements.get(i);
+                long count;
+                try {
+                    // TuGraph supports auto-commit only. A retry replays the ordered group;
+                    // idempotent MERGE/delete statements make partial auto-commits safe.
+                    count = readWrittenCount(session.run(stmt.cypher(), stmt.parameters()));
+                } catch (Neo4jException failure) {
+                    if (skippableOnMissingLabel != null && skippableOnMissingLabel[i]
+                            && isMissingVertexLabel(failure)) {
+                        skipped++;
+                        LOG.debug("Skipping statement for a missing vertex label: {}",
+                                failure.getMessage());
+                        continue;
+                    }
+                    throw failure;
+                }
+                if (count != NO_WRITTEN_COUNT) {
+                    written = (written == NO_WRITTEN_COUNT ? 0L : written) + count;
+                }
+            }
+            return new BatchWriteResult(written, skipped);
+        }
+    }
+
+    private BatchWriteResult writeBatchConcurrentlyOnce(List<CypherStatement> statements,
+                                                         boolean[] skippableOnMissingLabel,
+                                                         ExecutorService executor) {
+        List<Callable<BatchWriteResult>> tasks = new ArrayList<>(statements.size());
+        for (int i = 0; i < statements.size(); i++) {
+            List<CypherStatement> single = Collections.singletonList(statements.get(i));
+            boolean[] singleSkippable = skippableOnMissingLabel == null
+                    ? null
+                    : new boolean[] {skippableOnMissingLabel[i]};
+            tasks.add(() -> writeBatchOnce(single, singleSkippable));
+        }
+
+        try {
+            List<Future<BatchWriteResult>> futures = executor.invokeAll(tasks);
+            long written = NO_WRITTEN_COUNT;
+            int skipped = 0;
+            for (Future<BatchWriteResult> future : futures) {
+                BatchWriteResult result = future.get();
+                if (result.written() != NO_WRITTEN_COUNT) {
+                    written = (written == NO_WRITTEN_COUNT ? 0L : written) + result.written();
+                }
+                skipped += result.skippedMissingLabel();
+            }
+            return new BatchWriteResult(written, skipped);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while writing a TuGraph batch concurrently",
+                    interrupted);
+        } catch (ExecutionException failedTask) {
+            Throwable cause = failedTask.getCause();
+            if (cause instanceof RuntimeException) {
+                throw (RuntimeException) cause;
+            }
+            throw new RuntimeException("Concurrent TuGraph write failed", cause);
+        }
+    }
+
+    /** Preserve 0.2 semantics: every parallel statement owns its own max-retry counter. */
+    private BatchWriteResult writeBatchConcurrentlyLegacy(List<CypherStatement> statements,
+                                                           boolean[] skippableOnMissingLabel,
+                                                           ExecutorService executor) {
+        List<Future<BatchWriteResult>> futures = new ArrayList<>(statements.size());
+        for (int i = 0; i < statements.size(); i++) {
+            List<CypherStatement> single = Collections.singletonList(statements.get(i));
+            boolean[] singleSkippable = skippableOnMissingLabel == null
+                    ? null
+                    : new boolean[] {skippableOnMissingLabel[i]};
+            futures.add(executor.submit(() -> writeBatch(single, singleSkippable)));
+        }
+        return collectBatchResults(futures);
+    }
+
+    private static BatchWriteResult collectBatchResults(List<Future<BatchWriteResult>> futures) {
+        long written = NO_WRITTEN_COUNT;
+        int skipped = 0;
+        try {
+            for (Future<BatchWriteResult> future : futures) {
+                BatchWriteResult result = future.get();
+                if (result.written() != NO_WRITTEN_COUNT) {
+                    written = (written == NO_WRITTEN_COUNT ? 0L : written) + result.written();
+                }
+                skipped += result.skippedMissingLabel();
+            }
+            return new BatchWriteResult(written, skipped);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while writing a TuGraph batch concurrently",
+                    interrupted);
+        } catch (ExecutionException failedTask) {
+            Throwable cause = failedTask.getCause();
+            if (cause instanceof RuntimeException) {
+                throw (RuntimeException) cause;
+            }
+            throw new RuntimeException("Concurrent TuGraph write failed", cause);
+        }
+    }
+
+    private RetryPolicy retryPolicy() {
+        if (retryPolicy == null) {
+            retryPolicy = new RetryPolicy(options, retryListener);
+        }
+        return retryPolicy;
     }
 
     private void ensureOpen() {

@@ -36,6 +36,9 @@ class TuGraphSinkOptionsTest {
         assertThat(o.batchSize()).isEqualTo(500);
         assertThat(o.batchIntervalMs()).isEqualTo(1_000L);
         assertThat(o.maxRetries()).isEqualTo(3);
+        assertThat(o.retryBudgetMs()).isZero();
+        assertThat(o.retryInitialBackoffMs()).isEqualTo(1_000L);
+        assertThat(o.retryMaxBackoffMs()).isEqualTo(10_000L);
         assertThat(o.connectionTimeoutMs()).isEqualTo(15_000L);
         assertThat(o.maxConnectionPoolSize()).isEqualTo(10);
         assertThat(o.onMissingEndpoint()).isEqualTo(TuGraphSinkOptions.OnMissingEndpoint.SKIP);
@@ -81,6 +84,34 @@ class TuGraphSinkOptionsTest {
                 .uri("bolt://localhost:7687").auth("u", "p").batchSize(0).build())
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("batchSize");
+    }
+
+    @Test
+    void build_appliesRetryBudgetSettings() {
+        TuGraphSinkOptions o = TuGraphSinkOptions.builder()
+                .uri("bolt://localhost:7687")
+                .auth("u", "p")
+                .retryBudgetMs(90_000)
+                .retryInitialBackoffMs(500)
+                .retryMaxBackoffMs(5_000)
+                .build();
+
+        assertThat(o.retryBudgetMs()).isEqualTo(90_000L);
+        assertThat(o.retryInitialBackoffMs()).isEqualTo(500L);
+        assertThat(o.retryMaxBackoffMs()).isEqualTo(5_000L);
+    }
+
+    @Test
+    void build_rejectsInvalidRetrySettings() {
+        assertThatThrownBy(() -> TuGraphSinkOptions.builder()
+                .uri("bolt://localhost:7687").auth("u", "p").retryBudgetMs(-1).build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("retryBudgetMs");
+        assertThatThrownBy(() -> TuGraphSinkOptions.builder()
+                .uri("bolt://localhost:7687").auth("u", "p")
+                .retryInitialBackoffMs(2_000).retryMaxBackoffMs(1_000).build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("retryMaxBackoffMs");
     }
 
     @Test

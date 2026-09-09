@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-09
+
+### Fixed
+- **Timer-triggered transient flush failures no longer permanently poison the sink writer.** The
+  retained buffer is retried by a later timer or before the next `write`/checkpoint `flush`; a
+  successful replay clears the pending failure. Non-retryable schema, Cypher and authentication
+  failures still fail the task through Flink's regular error path.
+- In retry-budget mode, concurrent vertex flushes share one deadline and wait for every submitted
+  write before replaying the batch, so per-record attempts cannot outlive that budgeted flush.
+
+### Added
+- Optional wall-clock retry policy: `retryBudgetMs` / `sink.retry.budget.ms` plus configurable
+  initial and maximum exponential backoff. A zero budget preserves the 0.2 count-based retry policy.
+- Cause-chain classification for `ServiceUnavailableException`, `SessionExpiredException` and
+  `TransientException`; deterministic client and security failures are never retried.
+- `tugraph.retryAttempts` and `tugraph.asyncFlushFailures` counters, bounded retry WARN logs, and a
+  recovery INFO log containing the transient failure duration.
+
 ## [0.2.0] - 2026-07-08
 
 ### Changed
@@ -99,6 +117,7 @@ All notable changes to this project are documented here. The format is based on
   integration tests (gated on `TUGRAPH_IT=1`).
 - Runnable examples for DataStream and Flink SQL.
 
-[Unreleased]: https://github.com/coomia-ai/flink-tugraph-connector/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/coomia-ai/flink-tugraph-connector/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/coomia-ai/flink-tugraph-connector/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/coomia-ai/flink-tugraph-connector/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/coomia-ai/flink-tugraph-connector/releases/tag/v0.1.0

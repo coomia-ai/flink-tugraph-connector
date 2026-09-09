@@ -88,6 +88,22 @@ public class TuGraphSinkBuilder<T extends GraphElement> {
         return this;
     }
 
+    /** Enable wall-clock-budgeted retries for transient TuGraph connection failures. */
+    public TuGraphSinkBuilder<T> retryBudgetMs(long retryBudgetMs) {
+        options.retryBudgetMs(retryBudgetMs);
+        return this;
+    }
+
+    public TuGraphSinkBuilder<T> retryInitialBackoffMs(long retryInitialBackoffMs) {
+        options.retryInitialBackoffMs(retryInitialBackoffMs);
+        return this;
+    }
+
+    public TuGraphSinkBuilder<T> retryMaxBackoffMs(long retryMaxBackoffMs) {
+        options.retryMaxBackoffMs(retryMaxBackoffMs);
+        return this;
+    }
+
     public TuGraphSinkBuilder<T> connectionTimeoutMs(long connectionTimeoutMs) {
         options.connectionTimeoutMs(connectionTimeoutMs);
         return this;
