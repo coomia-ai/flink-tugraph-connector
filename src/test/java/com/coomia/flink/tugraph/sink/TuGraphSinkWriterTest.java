@@ -21,6 +21,8 @@ import com.coomia.flink.tugraph.TuGraphSinkOptions;
 import com.coomia.flink.tugraph.client.TuGraphConnection;
 import com.coomia.flink.tugraph.cypher.CypherStatement;
 import com.coomia.flink.tugraph.cypher.MergeCypherStatementBuilder;
+import com.coomia.flink.tugraph.element.Edge;
+import com.coomia.flink.tugraph.element.GraphElement;
 import com.coomia.flink.tugraph.element.Vertex;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.streaming.runtime.tasks.TestProcessingTimeService;
@@ -113,9 +115,49 @@ class TuGraphSinkWriterTest {
         assertThatThrownBy(writer::close).isInstanceOf(IOException.class);
     }
 
-    private static TuGraphSinkWriter<Vertex> writer(TuGraphSinkOptions options,
-                                                     TuGraphConnection connection,
-                                                     TestProcessingTimeService time) {
+    @Test
+    void distinctVertexUpsertsUseNativeBulkProcedure() throws Exception {
+        TuGraphSinkOptions options = options();
+        FakeConnection connection = new FakeConnection(options);
+        TuGraphSinkWriter<Vertex> writer = writer(options, connection, new TestProcessingTimeService());
+
+        writer.write(vertex(1), null);
+        writer.write(vertex(2), null);
+        writer.write(vertex(3), null);
+        writer.flush(true);
+
+        assertThat(connection.batches).hasSize(1);
+        assertThat(connection.batches.get(0)).hasSize(1);
+        CypherStatement statement = connection.batches.get(0).get(0);
+        assertThat(statement.cypher()).isEqualTo("CALL db.upsertVertex('person', $__onto_rows)");
+        assertThat(statement.parameters().get("__onto_rows"))
+                .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.LIST)
+                .hasSize(3);
+        writer.close();
+    }
+
+    @Test
+    void distinctEndpointCompleteEdgesUseNativeBulkProcedure() throws Exception {
+        TuGraphSinkOptions options = options();
+        FakeConnection connection = new FakeConnection(options);
+        TuGraphSinkWriter<Edge> writer = writer(options, connection, new TestProcessingTimeService());
+
+        writer.write(edge("c-1", "a-1"), null);
+        writer.write(edge("c-2", "a-2"), null);
+        writer.flush(true);
+
+        assertThat(connection.batches).hasSize(1);
+        CypherStatement statement = connection.batches.get(0).get(0);
+        assertThat(statement.cypher()).startsWith("CALL db.upsertEdge('OWNS'");
+        assertThat(statement.parameters().get("__onto_rows"))
+                .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.LIST)
+                .hasSize(2);
+        writer.close();
+    }
+
+    private static <T extends GraphElement> TuGraphSinkWriter<T> writer(TuGraphSinkOptions options,
+                                                                         TuGraphConnection connection,
+                                                                         TestProcessingTimeService time) {
         return new TuGraphSinkWriter<>(options, ElementConverter.identity(),
                 new MergeCypherStatementBuilder(),
                 UnregisteredMetricsGroup.createSinkWriterMetricGroup(), time, connection);
@@ -134,6 +176,10 @@ class TuGraphSinkWriterTest {
         return Vertex.of("person", "id", id, Map.of("id", id));
     }
 
+    private static Edge edge(String src, String dst) {
+        return new Edge("OWNS", "Customer", "id", src, "Account", "id", dst, Map.of());
+    }
+
     private static Exception asyncFailure(TuGraphSinkWriter<?> writer) throws Exception {
         Field field = TuGraphSinkWriter.class.getDeclaredField("asyncFlushException");
         field.setAccessible(true);
@@ -144,6 +190,7 @@ class TuGraphSinkWriterTest {
         private static final Object SUCCESS = new Object();
 
         private final Deque<Object> outcomes = new ArrayDeque<>();
+        private final List<List<CypherStatement>> batches = new java.util.ArrayList<>();
         private int calls;
         private int successfulStatements;
 
@@ -181,6 +228,7 @@ class TuGraphSinkWriterTest {
 
         private BatchWriteResult completeAttempt(List<CypherStatement> statements) {
             calls++;
+            batches.add(List.copyOf(statements));
             Object outcome = outcomes.isEmpty() ? SUCCESS : outcomes.removeFirst();
             if (outcome instanceof RuntimeException) {
                 throw (RuntimeException) outcome;

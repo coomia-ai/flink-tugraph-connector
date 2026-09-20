@@ -249,7 +249,7 @@ public class TuGraphConnection implements AutoCloseable, Serializable {
         return message != null && message.contains("No such vertex label");
     }
 
-    /** Read the single {@code written} count produced by an edge upsert, if present. */
+    /** Read a connector MERGE count or native procedure insert/update count, if present. */
     private static long readWrittenCount(Result result) {
         List<Record> records = result.list();
         if (records.isEmpty()) {
@@ -258,6 +258,13 @@ public class TuGraphConnection implements AutoCloseable, Serializable {
         Record first = records.get(0);
         if (first.containsKey(CypherStatementBuilder.WRITTEN_COUNT_FIELD)) {
             return first.get(CypherStatementBuilder.WRITTEN_COUNT_FIELD).asLong(NO_WRITTEN_COUNT);
+        }
+        if (first.containsKey("insert") || first.containsKey("update")) {
+            long insert = first.containsKey("insert")
+                    ? first.get("insert").asLong(0L) : 0L;
+            long update = first.containsKey("update")
+                    ? first.get("update").asLong(0L) : 0L;
+            return insert + update;
         }
         return NO_WRITTEN_COUNT;
     }

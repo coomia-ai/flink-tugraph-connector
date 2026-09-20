@@ -26,11 +26,11 @@ import java.util.List;
 /**
  * Turns a homogeneous batch of graph elements into the Cypher statements that upsert them.
  *
- * <p>A batch maps to a <em>list</em> of statements because TuGraph's openCypher subset cannot
- * always express a whole batch in one query: vertices that share a label but differ in which
- * properties are present become one {@code UNWIND} statement per property-set, and edges become one
- * parameterized statement each (TuGraph rejects matching two endpoints inside an {@code UNWIND}).
- * Run the returned statements together in a single transaction.
+ * <p>The MERGE compatibility path maps a batch to a <em>list</em> of statements because TuGraph's
+ * openCypher subset cannot always express a whole batch in one query: vertices that share a label
+ * but differ in which properties are present need separate statements, and edges need one
+ * parameterized statement each. The sink may use the native bulk procedures instead when their
+ * stricter capability and ordering preconditions are satisfied.
  *
  * <p>This is the connector's main extension point for dialect portability. Implementations must be
  * {@link Serializable} (the sink is shipped to task managers).
